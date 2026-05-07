@@ -22,7 +22,7 @@ def load_tulu_splits():
     
     return splits['train'], splits['test']
 
-def get_preprocess_function(tokenizer, max_length):
+def get_preprocess_function(tokenizer, max_length, template_string):
     def preprocess_function(examples):
         batch_input_ids = []
         batch_attention_mask = []
@@ -30,7 +30,7 @@ def get_preprocess_function(tokenizer, max_length):
         
         for conversation in examples['messages']:
             full_text = tokenizer.apply_chat_template(
-                conversation, tokenize=False, add_generation_prompt=False
+                conversation, chat_template=template_string, tokenize=False, add_generation_prompt=False
             )
             
             encoding = tokenizer(
@@ -91,7 +91,9 @@ if __name__ == "__main__":
     
     max_len = 512
     print("Inizio pre-tokenizzazione offline (Multi-Core)...")
-    preprocess_fn = get_preprocess_function(tokenizer, max_len)
+    
+    template_str = tokenizer.chat_template
+    preprocess_fn = get_preprocess_function(tokenizer, max_len, template_str)
     
     train_data = train_data.map(
         preprocess_fn,
