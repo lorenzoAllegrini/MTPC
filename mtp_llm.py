@@ -5,10 +5,16 @@ from transformers import AutoModelForCausalLM, T5ForConditionalGeneration
 class MTP_LLM(nn.Module):
     def __init__(self, model_id, head_class, window_size=8):
         super().__init__()
+        # Selezioniamo il dtype ottimale per il device
+        if torch.cuda.is_available():
+            best_dtype = torch.bfloat16 # Ottimale per A100
+        else:
+            best_dtype = torch.float32  # MPS (Mac) non supporta bene BF16 nelle MatMul
+
         self.backbone = T5ForConditionalGeneration.from_pretrained(
             model_id,
             device_map="auto",
-            torch_dtype=torch.bfloat16
+            torch_dtype=best_dtype
         )
         
         config = self.backbone.config
