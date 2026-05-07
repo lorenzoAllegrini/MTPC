@@ -7,7 +7,8 @@ class MTP_LLM(nn.Module):
         super().__init__()
         self.backbone = T5ForConditionalGeneration.from_pretrained(
             model_id,
-            device_map="auto"
+            device_map="auto",
+            torch_dtype=torch.bfloat16
         )
         
         config = self.backbone.config
@@ -28,12 +29,14 @@ class MTP_LLM(nn.Module):
         """
         Il passaggio in avanti completo: Input -> Backbone -> MTP Head
         """
-        outputs = self.backbone(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            decoder_input_ids=input_ids,
-            output_hidden_states=True
-        ) 
+        # Evitiamo di costruire il grafo computazionale per il backbone
+        with torch.no_grad():
+            outputs = self.backbone(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                decoder_input_ids=input_ids,
+                output_hidden_states=True
+            ) 
         
         # Detachiamo gli hidden states per evitare di calcolare i gradienti per il backbone
         # ma permettiamo il calcolo dei gradienti per la mtp_head
