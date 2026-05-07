@@ -130,4 +130,62 @@ if __name__ == "__main__":
     
     # 6. SALVATAGGIO
     torch.save(model.mtp_head.state_dict(), "mtp_head_byt5_final.pth")
-    print("Training terminato con successo!")
+    print("Training terminato e modello salvato con successo!")
+
+    # 7. VALIDAZIONE QUALITATIVA
+    print("\n" + "="*50)
+    print("INIZIO VALIDAZIONE SUL VAL SET")
+    print("="*50)
+    
+    model.eval()
+    
+    # Prendiamo 3 esempi dal val_data
+    sample_val = val_data.select(range(3))
+    
+    # Li mappiamo al volo per avere i tensori corretti
+    sample_val = sample_val.map(
+        preprocess_fn,
+        batched=True,
+        num_proc=1,
+        remove_columns=sample_val.column_names,
+        desc="Pre-tokenizing validation sample"
+    )
+    
+    val_dataset = MTPChatDataset(sample_val)
+    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+    
+    with torch.no_grad():
+        for i, batch in enumerate(val_loader):
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['labels'].to(device)
+            
+            _, mtp_logits = model(input_ids, attention_mask=attention_mask)
+            
+            # mtp_logits shape: [1, L, 8, V]
+            # Cerchiamo gli indici in cui c'è una risposta dell'assistente (label != -100)
+            valid_indices = (labels[0] != -100).nonzero(as_tuple=True)[0]
+            
+            if len(valid_indices) == 0:
+                continue
+                
+            # Scegliamo un punto a metà della generazione dell'assistente
+            test_idx = valid_indices[len(valid_indices) // 2].item()
+            
+            # Decodifichiamo il contesto (fino a test_idx incluso)
+            context_ids = input_ids[0, :test_idx + 1]
+            context_text = tokenizer.decode(context_ids)
+            
+            # Decodifichiamo i veri 8 caratteri successivi
+            true_continuation_ids = input_ids[0, test_idx + 1 : test_idx + 1 + window_size]
+            true_continuation_text = tokenizer.decode(true_continuation_ids)
+            
+            # Decodifichiamo gli 8 caratteri predetti simultaneamente dalla testa MTP
+            predicted_logits = mtp_logits[0, test_idx] # Shape: [8, Vocab]
+            predicted_ids = predicted_logits.argmax(dim=-1) # Shape: [8]
+            predicted_text = tokenizer.decode(predicted_ids)
+            
+            print(f"\n--- ESEMPIO DI VALIDAZIONE {i+1} ---")
+            print(f"CONTESTO PRECEDENTE (ultimi 80 char): ...{context_text[-80:]!r}")
+            print(f"CONTINUAZIONE REALE ({window_size} char): {true_continuation_text!r}")
+            print(f"PREDIZIONE TESTA FF ({window_size} char): {predicted_text!r}")
