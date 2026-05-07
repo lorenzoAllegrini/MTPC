@@ -14,10 +14,12 @@ from mtp_llm import MTP_LLM
 from training_loop import MTPChatDataset, train_mtp
 
 def load_tulu_splits():
-    full_dataset = load_dataset("allenai/tulu-3-sft-mixture", split="train")
+    # Carichiamo solo i primi 10.000 campioni per un training rapido
+    full_dataset = load_dataset("allenai/tulu-3-sft-mixture", split="train[:10000]")
     
     full_dataset = full_dataset.shuffle(seed=42)
     
+    # 1% di validation (circa 100 campioni)
     splits = full_dataset.train_test_split(test_size=0.01)
     
     return splits['train'], splits['test']
