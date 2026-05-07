@@ -1,0 +1,13 @@
+# Ignora la cache dei dati e gli shard
+feature_shards/
+temp_features/
+*.pt
+*.zip
+
+# Ignora l'ambiente virtuale e i log
+.venv/
+__pycache__/
+.DS_Store
+
+*.parquet
+feature_cache/
