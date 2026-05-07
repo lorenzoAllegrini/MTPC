@@ -9,46 +9,25 @@ from torch.optim import Adam
 
 
 class MTPChatDataset(Dataset):
-    def __init__(self, raw_data, tokenizer, max_length=512):
-        self.raw_data = raw_data
-        self.tokenizer = tokenizer
-        self.max_length = max_length
+    def __init__(self, mapped_data):
+        """
+        Inizializza il dataset con i dati pre-tokenizzati (tramite dataset.map).
+        """
+        self.mapped_data = mapped_data
 
     def __len__(self):
-        return len(self.raw_data)
+        return len(self.mapped_data)
 
     def __getitem__(self, idx):
-        conversation = self.raw_data[idx]['messages']
+        item = self.mapped_data[idx]
         
-        full_text = self.tokenizer.apply_chat_template(
-            conversation, tokenize=False, add_generation_prompt=False
-        )
-        
-        encoding = self.tokenizer(
-            full_text, truncation=True, max_length=self.max_length,
-            padding='max_length', add_special_tokens=False, return_tensors='pt'
-        )
-        
-        input_ids = encoding['input_ids'].squeeze(0)
-        attention_mask = encoding['attention_mask'].squeeze(0)
-        labels = input_ids.clone()
-        
-        current_offset = 0
-        for msg in conversation:
-            msg_text = f"<|{msg['role']}|>\n{msg['content']}<|end|>\n"
-            msg_len = len(msg_text.encode('utf-8'))
-            
-            if msg['role'] != "assistant":
-                start = current_offset
-                end = min(current_offset + msg_len, self.max_length)
-                if start < self.max_length:
-                    labels[start:end] = -100
-            
-            current_offset += msg_len
-            if current_offset >= self.max_length: break
-
-        labels[attention_mask == 0] = -100
-        return {'input_ids': input_ids, 'attention_mask': attention_mask, 'labels': labels}
+        # Restituiamo i tensori già pronti per il DataLoader.
+        # Nessuna tokenizzazione o manipolazione di stringhe avviene qui.
+        return {
+            'input_ids': torch.tensor(item['input_ids'], dtype=torch.long),
+            'attention_mask': torch.tensor(item['attention_mask'], dtype=torch.long),
+            'labels': torch.tensor(item['labels'], dtype=torch.long)
+        }
 
 
 def compute_mtpc_loss(mtp_logits, labels, window_size, gamma=0.9, ignore_index=-100):

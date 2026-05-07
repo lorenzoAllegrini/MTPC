@@ -22,8 +22,59 @@ def load_tulu_splits():
     
     return splits['train'], splits['test']
 
+def get_preprocess_function(tokenizer, max_length):
+    def preprocess_function(examples):
+        batch_input_ids = []
+        batch_attention_mask = []
+        batch_labels = []
+        
+        for conversation in examples['messages']:
+            full_text = tokenizer.apply_chat_template(
+                conversation, tokenize=False, add_generation_prompt=False
+            )
+            
+            encoding = tokenizer(
+                full_text, truncation=True, max_length=max_length,
+                padding='max_length', add_special_tokens=False
+            )
+            
+            input_ids = encoding['input_ids']
+            attention_mask = encoding['attention_mask']
+            labels = list(input_ids) # Copy
+            
+            current_offset = 0
+            for msg in conversation:
+                msg_text = f"<|{msg['role']}|>\n{msg['content']}<|end|>\n"
+                msg_len = len(msg_text.encode('utf-8'))
+                
+                if msg['role'] != "assistant":
+                    start = current_offset
+                    end = min(current_offset + msg_len, max_length)
+                    if start < max_length:
+                        for i in range(start, end):
+                            labels[i] = -100
+                
+                current_offset += msg_len
+                if current_offset >= max_length: break
+
+            # Mask padding
+            for i in range(max_length):
+                if attention_mask[i] == 0:
+                    labels[i] = -100
+            
+            batch_input_ids.append(input_ids)
+            batch_attention_mask.append(attention_mask)
+            batch_labels.append(labels)
+            
+        return {
+            'input_ids': batch_input_ids,
+            'attention_mask': batch_attention_mask,
+            'labels': batch_labels
+        }
+    return preprocess_function
+
 if __name__ == "__main__":
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     train_data, val_data = load_tulu_splits()
     print(f"Dataset caricato: {len(train_data)} train, {len(val_data)} val")
     
@@ -38,7 +89,19 @@ if __name__ == "__main__":
         "{% endif %}"
     )
     
-    train_chat_dataset = MTPChatDataset(train_data, tokenizer, max_length=512)
+    max_len = 512
+    print("Inizio pre-tokenizzazione offline (Multi-Core)...")
+    preprocess_fn = get_preprocess_function(tokenizer, max_len)
+    
+    train_data = train_data.map(
+        preprocess_fn,
+        batched=True,
+        num_proc=4,
+        remove_columns=train_data.column_names,
+        desc="Pre-tokenizing train data"
+    )
+    
+    train_chat_dataset = MTPChatDataset(train_data)
     # Ottimizzazioni per l'A100: batch size alto e multi-processing per il Dataloader
     train_loader = DataLoader(
         train_chat_dataset, 
