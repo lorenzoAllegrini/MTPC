@@ -11,3 +11,9 @@ __pycache__/
 
 *.parquet
 feature_cache/
+.Rproj.user
+.positai
+/lessons
+*.Rproj
+*.rds
+/saved_models
