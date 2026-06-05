@@ -11,7 +11,9 @@ WINDOW_SIZE = 6L
 RANKS = 32L
 MAX_LEN = 2048L
 SHIFT_OFFSET_MINUS_1 = FALSE # Set to TRUE only if loading legacy checkpoints trained with shifted target alignment
-CHEAT = TRUE # Set to TRUE to enable cheating mode (feeding generated context to encoder)
+CHEAT = FALSE # Keep FALSE: cheat feeds the full answer into byT5's bidirectional encoder during
+              # training, so the model learns to copy it instead of predicting -> byte-salad at
+              # inference (the answer isn't in the encoder yet). Train and infer without cheat.
 
 
 N_SAMPLES = 3L
