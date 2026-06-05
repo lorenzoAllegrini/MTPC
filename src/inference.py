@@ -150,8 +150,8 @@ if __name__ == "__main__":
             # Context up to test_idx (input for the head at test_idx)
             context_ids = input_ids[0, :test_idx]
             
-            # True next tokens (ground truth for window)
-            true_ids = labels[0, test_idx + 1 : test_idx + 1 + WINDOW_SIZE]
+            # True next tokens (ground truth for window): step 1 predicts labels[test_idx]
+            true_ids = labels[0, test_idx : test_idx + WINDOW_SIZE]
             
             if head_name in ['CanonicPolyidiac', 'MTPC_HMM']:
                 # These expect hidden states [1, 1, D]

@@ -54,10 +54,16 @@ class MTPChatDataset(Dataset):
 
 def compute_mtpc_loss(mtp_logits, labels, window_size, gamma=0.8, ignore_index=-100, is_log_probs=False):
     combined_loss = 0.0
+    seq_len = mtp_logits.shape[1]
     for j in range(1, window_size + 1):
-        current_logits = mtp_logits[:, :-j, j-1, :] 
-        current_labels = labels[:, j:]
-        
+        # Paper-aligned: step j (head j-1) predicts the token (j-1) positions ahead of the
+        # immediate next one. So step 1 predicts labels[t] (the immediate next token), matching
+        # the STP head used for initialisation and the verifier; inference can then draft from
+        # the last hidden state instead of needing a -1 offset.
+        shift = j - 1
+        current_logits = mtp_logits[:, :seq_len - shift, j-1, :]
+        current_labels = labels[:, shift:]
+
         if is_log_probs:
             step_loss = F.nll_loss(
                 current_logits.reshape(-1, current_logits.size(-1)),

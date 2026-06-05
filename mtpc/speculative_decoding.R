@@ -6,11 +6,9 @@ self_speculative_decoding_step = function(verifier_model, draft_model, prompt_id
   #compute last embedding
   hidden_states = llm_get_hidden_states(draft_model, prompt_ids, decoder_ids, attention_mask = attention_mask, encoder_outputs = draft_encoder_outputs)$x
 
-  # draft from the second-to-last hidden state: the MTP head is trained one position ahead
-  # (labels shifted +1), so drafting from the last hidden state would predict one token too
-  # far and misalign with the verifier (which scores from position L-1), killing acceptance.
-  L_hs = as.integer(hidden_states$size(1L))
-  probs = circuit$get_draft_probs(draft_model, hidden_states$narrow(1L, 0L, L_hs - 1L))
+  # draft from the last hidden state: the MTP head is trained so step 1 predicts the immediate
+  # next token (paper-aligned compute_mtpc_loss), matching the verifier which scores from L-1.
+  probs = circuit$get_draft_probs(draft_model, hidden_states)
   drafted_tokens = circuit$generate_draft(probs)
   
   if (!is.null(tokenizer) && verbose) {draft_str = safe_decode(tokenizer, as.integer(drafted_tokens)); cat(sprintf(" drafted tokens: '%s'\n", draft_str))}

@@ -900,8 +900,8 @@ def main():
                 
                 # Context up to test_idx
                 context_ids = input_ids[b, :test_idx]
-                # True next tokens (ground truth for window)
-                true_ids = labels[b, test_idx + 1 : test_idx + 1 + window_size]
+                # True next tokens (ground truth for window): step 1 predicts labels[test_idx]
+                true_ids = labels[b, test_idx : test_idx + window_size]
                 
                 # Get logits/log_probs at test_idx
                 is_log_probs = head_type in ['CanonicPolyidiac', 'MTPC_HMM']
