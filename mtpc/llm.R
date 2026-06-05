@@ -24,11 +24,9 @@ LLMWrapper = setRefClass("LLMWrapper",
     initialize = function(model_id, head_type = NULL, window_size = 6L, ranks = 32L, lora_path = NULL, lora_r = 8L, lora_alpha = 16L, cheat = FALSE) {
       cheat <<- as.logical(cheat)
       # initializes the llm wrapper by loading the backbone model, configuring lora, and setting up the module dict
-      best_dtype = if (torch$cuda$is_available()) {
-        torch$bfloat16
-      } else {
-        torch$float32
-      }
+      # float32 on every device: the heads are float32, so a bf16 backbone would raise a dtype
+      # mismatch in the head forward on CUDA. byT5-small is small enough that float32 is fine.
+      best_dtype = torch$float32
 
       backbone <<- transformers$T5ForConditionalGeneration$from_pretrained(
         model_id,

@@ -21,10 +21,11 @@ class MTP_LLM(nn.Module):
         super().__init__()
         self.cheat = cheat
         
-        if torch.cuda.is_available():
-            best_dtype = torch.bfloat16
-        else:
-            best_dtype = torch.float32
+        # Use float32 on every device. The circuit heads are created in float32, so a bf16
+        # backbone would raise "mat1 and mat2 must have the same dtype" in the head forward
+        # on CUDA. byT5-small is small enough that float32 is fine and keeps the circuit's
+        # log-space math numerically stable.
+        best_dtype = torch.float32
 
         self.backbone = AutoModelForSeq2SeqLM.from_pretrained(
             model_id,
