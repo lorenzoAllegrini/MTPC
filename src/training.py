@@ -311,6 +311,7 @@ def main():
     parser.add_argument("--cheat", action="store_true", help="Enable cheating mode (feed generated tokens to encoder during SFT and validation).")
     parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "mps", "cpu"], help="Compute device (default: cuda).")
     parser.add_argument("--amp", action="store_true", help="Enable bf16 mixed-precision autocast (recommended on A100/Ampere+ GPUs).")
+    parser.add_argument("--num_workers", type=int, default=4, help="DataLoader workers (raise to keep the GPU fed; 0 = main thread).")
     args = parser.parse_args()
     args.use_pretrain = (args.use_pretrain == "true")
 
@@ -382,11 +383,13 @@ def main():
 
     train_chat_dataset = MTPChatDataset(train_data)
     train_loader = DataLoader(
-        train_chat_dataset, 
-        batch_size=batch_size, 
-        shuffle=True, 
-        num_workers=0, 
-        pin_memory=False
+        train_chat_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,                 # feed the GPU in parallel (0 starves it)
+        pin_memory=(device.type == "cuda"),
+        persistent_workers=(args.num_workers > 0),
+        drop_last=False,
     )
     
     # Toggle to skip Phase 2 (Joint training), Phase 0 (Backbone SFT) and/or Phase 1 (FF Warm-up) and load existing weights
