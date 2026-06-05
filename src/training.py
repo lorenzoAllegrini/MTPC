@@ -983,7 +983,10 @@ def main():
                 
                 # Predict speculative window of tokens
                 if head_type in ['CanonicPolyidiac', 'MTPC_HMM']:
-                    test_emb = hidden_states[:, test_idx:test_idx+1, :]
+                    # Use THIS example's hidden state (b), not the whole batch then [0] — otherwise
+                    # the sampled draft comes from batch item 0 while the printed marginal is item b,
+                    # making the sampled tokens look like ~0-probability garbage.
+                    test_emb = hidden_states[b:b+1, test_idx:test_idx+1, :]
                     sampled_ids = model._circuit.generate_draft(test_emb)[0]
                 else:
                     sampled_ids = sample_logits.argmax(dim=-1)
