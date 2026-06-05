@@ -312,6 +312,7 @@ def main():
     parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "mps", "cpu"], help="Compute device (default: cuda).")
     parser.add_argument("--amp", action="store_true", help="Enable bf16 mixed-precision autocast (recommended on A100/Ampere+ GPUs).")
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader workers (raise to keep the GPU fed; 0 = main thread).")
+    parser.add_argument("--save_dir", type=str, default=None, help="Directory for checkpoints + tokenized cache (default: <repo>/saved_models). Set to a Google Drive path to persist models.")
     args = parser.parse_args()
     args.use_pretrain = (args.use_pretrain == "true")
 
@@ -348,10 +349,14 @@ def main():
         target_head_class = MTPC_HMM
     elif args.head == "ff":
         target_head_class = FF
-    
+
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    save_dir = os.path.join(base_dir, "saved_models")
+    # Where to read/write checkpoints (and the tokenized cache). Default: <repo>/saved_models.
+    # Pass --save_dir to point this at a Google Drive folder (e.g. when the repo is cloned to
+    # the fast local /content disk but you want models persisted on Drive).
+    save_dir = args.save_dir if args.save_dir else os.path.join(base_dir, "saved_models")
     os.makedirs(save_dir, exist_ok=True)
+    print(f"[SYSTEM] Checkpoints will be saved to: {save_dir}")
 
     # Cache tokenized dataset on disk to avoid re-tokenizing on every trial (includes max_len in key)
     tokenized_path = os.path.join(save_dir, f"tokenized_train_data_{max_samples}_len{max_len}")
@@ -868,11 +873,8 @@ def main():
     head_type = model._head_class_name
     head_name_str = "cp" if head_type == "CanonicPolyidiac" else ("hmm" if head_type == "MTPC_HMM" else head_type.lower())
     filename = f"mtp_head_{head_name_str}_w{window_size}_final.pth"
-    
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    save_dir = os.path.join(base_dir, "saved_models")
-    os.makedirs(save_dir, exist_ok=True)
-    
+
+    os.makedirs(save_dir, exist_ok=True)  # reuse save_dir resolved above (respects --save_dir)
     save_path = os.path.join(save_dir, filename)
     torch.save(model.heads.state_dict(), save_path)
     print(f"\n[SYSTEM] Speculative head ({head_type}) weights saved to {save_path}")
