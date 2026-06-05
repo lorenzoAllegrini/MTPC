@@ -9,6 +9,7 @@ from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
 from torch.optim import Adam
 from tqdm import tqdm
+from contextlib import nullcontext
 
 from models.probabilistic_circuits import FF, CanonicPolyidiac, MTPC_HMM
 from models.mtp_llm import MTP_LLM 
@@ -309,6 +310,7 @@ def main():
     parser.add_argument("--head_weights_path", type=str, default=None, help="Custom path to speculative head weights .pth file to load.")
     parser.add_argument("--cheat", action="store_true", help="Enable cheating mode (feed generated tokens to encoder during SFT and validation).")
     parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "mps", "cpu"], help="Compute device (default: cuda).")
+    parser.add_argument("--amp", action="store_true", help="Enable bf16 mixed-precision autocast (recommended on A100/Ampere+ GPUs).")
     args = parser.parse_args()
     args.use_pretrain = (args.use_pretrain == "true")
 
@@ -322,7 +324,16 @@ def main():
         print("[WARNING] --device mps requested but MPS is unavailable; using 'cpu'.")
         args.device = "cpu"
     device = torch.device(args.device)
-    print(f"Device: {device} | Model: {model_id}")
+
+    # Performance: enable TF32 matmuls on Ampere+ (negligible precision impact, free speedup).
+    if device.type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    # bf16 autocast context (params stay fp32 -> no head/backbone dtype clash; softmax/logsumexp/
+    # loss stay fp32 -> stable). No GradScaler needed for bf16.
+    amp_ctx = (torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+               if (args.amp and device.type in ("cuda", "cpu")) else nullcontext())
+    print(f"Device: {device} | Model: {model_id} | amp={'bf16' if args.amp else 'off'}")
     
     # 1. DATASET SETUP
     max_samples = args.max_samples
@@ -561,13 +572,14 @@ def main():
                 encoder_input_ids[labels != -100] = decoder_start_token_id
             
             # Standard Seq2Seq forward pass through the backbone (calculates autoregressive loss)
-            outputs = model.backbone(
-                input_ids=encoder_input_ids,
-                attention_mask=attention_mask,
-                labels=labels
-            )
-            loss = outputs.loss
-            
+            with amp_ctx:
+                outputs = model.backbone(
+                    input_ids=encoder_input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels
+                )
+                loss = outputs.loss
+
             # Normalize the loss by gradient accumulation steps
             loss = loss / accumulation_steps
             loss.backward()
@@ -650,9 +662,10 @@ def main():
             else:
                 optimizer.param_groups[1]['lr'] = base_lora_lr
                 
-            _, mtp_logits, _ = model(input_ids, attention_mask=attention_mask, labels=labels)
-            loss = compute_mtpc_loss(mtp_logits, labels, window_size, gamma=0.8, is_log_probs=False)
-            
+            with amp_ctx:
+                _, mtp_logits, _ = model(input_ids, attention_mask=attention_mask, labels=labels)
+                loss = compute_mtpc_loss(mtp_logits, labels, window_size, gamma=0.8, is_log_probs=False)
+
             # Normalize the loss by gradient accumulation steps
             loss = loss / accumulation_steps
             loss.backward()
@@ -816,9 +829,10 @@ def main():
             else:
                 optimizer.param_groups[1]['lr'] = target_lora_lr
                 
-            _, mtp_logits, _ = model(input_ids, attention_mask=attention_mask, labels=labels)
-            loss = compute_mtpc_loss(mtp_logits, labels, window_size, gamma=0.8, is_log_probs=is_log_probs)
-            
+            with amp_ctx:
+                _, mtp_logits, _ = model(input_ids, attention_mask=attention_mask, labels=labels)
+                loss = compute_mtpc_loss(mtp_logits, labels, window_size, gamma=0.8, is_log_probs=is_log_probs)
+
             # Normalize the loss by gradient accumulation steps
             loss = loss / accumulation_steps
             loss.backward()
