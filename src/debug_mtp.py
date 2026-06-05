@@ -19,7 +19,28 @@ def debug_generation(prompt, prefix, model_id="google/byt5-small", weights_path=
     )
     
     state_dict = torch.load(weights_path, map_location=device, weights_only=True)
-    model.heads.load_state_dict(state_dict)
+    
+    # Remap old keys to new paper-aligned keys for backward compatibility
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_k = k
+        if k.startswith("gate."):
+            new_k = k.replace("gate.", "sum_unit_omega.", 1)
+        elif k.startswith("emission_projs."):
+            new_k = k.replace("emission_projs.", "input_units_phi.", 1)
+        elif k.startswith("init_gate."):
+            new_k = k.replace("init_gate.", "sum_unit_omega_init.", 1)
+        elif k.startswith("emissions."):
+            new_k = k.replace("emissions.", "input_units_phi.", 1)
+        elif k.startswith("transitions."):
+            new_k = k.replace("transitions.", "sum_unit_omega_transitions.", 1)
+        elif k.startswith("emission_") and (".weight" in k or ".bias" in k):
+            parts = k.split(".", 1)
+            num = parts[0].split("_")[1]
+            new_k = f"input_units_phi_{num}.{parts[1]}"
+        new_state_dict[new_k] = v
+        
+    model.heads.load_state_dict(new_state_dict)
     model.to(device)
     model.eval()
 
@@ -47,13 +68,13 @@ def debug_generation(prompt, prefix, model_id="google/byt5-small", weights_path=
         
         # Generate draft (GREEDY)
         # 1. Select most probable Rank
-        gate_logits = model.heads.gate(last_hidden_state[:, -1:, :]) # [1, 1, R]
+        gate_logits = model.heads.sum_unit_omega(last_hidden_state[:, -1:, :]) # [1, 1, R]
         selected_rank = gate_logits.argmax(dim=-1).item()
         
         # 2. Select most probable tokens for that Rank
-        flat_emissions = model.heads.emission_projs(last_hidden_state[:, -1:, :])
-        emissions = flat_emissions.view(1, 1, model._circuit.ranks, model._circuit.window_size, model._circuit.vocabulary_size)
-        selected_logits = emissions[0, 0, selected_rank, :, :] # [W, V]
+        flat_input_units = model.heads.input_units_phi(last_hidden_state[:, -1:, :])
+        input_units = flat_input_units.view(1, 1, model._circuit.ranks, model._circuit.window_size, model._circuit.vocabulary_size)
+        selected_logits = input_units[0, 0, selected_rank, :, :] # [W, V]
         drafted_tokens = selected_logits.argmax(dim=-1) # [W]
         
         draft_text = tokenizer.decode(drafted_tokens)

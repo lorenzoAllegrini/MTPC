@@ -1,178 +1,179 @@
 source("mtpc/llm.R")
 source("mtpc/utils.R")
-source("data_utils.R")
+source("utils.R")
 source("mtpc/probabilistic_circuits.R")
 source("mtpc/speculative_decoding.R")
 
-torch_py <- import("torch")
-datasets_py <- import("datasets")
+# target models and architectures
+MODEL_ID = "google/byt5-small"
+PROBABILISTIC_HEADS = c("cp") 
+WINDOW_SIZE = 6L
+RANKS = 32L
+MAX_LEN = 2048L
+SHIFT_OFFSET_MINUS_1 = FALSE # Set to TRUE only if loading legacy checkpoints trained with shifted target alignment
+CHEAT = TRUE # Set to TRUE to enable cheating mode (feeding generated context to encoder)
 
-# --- CONFIGURAZIONE ---
-MODEL_ID           <- "google/byt5-small"
-PROBABILISTIC_HEADS <- c("cp", "ff", "hmm") 
-WINDOW_SIZE        <- 6L
-RANKS              <- 32L
-MAX_LEN            <- 2048L
-N_SAMPLES          <- 100L
 
-CHAT_TEMPLATE <- "{% for message in messages %}{% if message['role'] == 'user' %}{{ 'User: ' + message['content'] + '\n' }}{% elif message['role'] == 'assistant' %}{{ 'Assistant: ' + message['content'] + '\n' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ 'Assistant: ' }}{% endif %}"
+N_SAMPLES = 3L
 
-#' Funzione Core per il Testing dell'Inferenza
-run_inference_experiment <- function(dataset, verifier_model, draft_model, circuit, tokenizer, n_samples = 100, max_new_tokens = 60L) {
+CHAT_TEMPLATE = "{% for message in messages %}{% if message['role'] == 'user' %}{{ '<|user|>\\n' + message['content'] + '\\n' }}{% elif message['role'] == 'assistant' %}{{ '<|assistant|>\\n' + message['content'] + '<|end|>\\n' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>\\n' }}{% endif %}"
+
+run_inference_experiment = function(dataset, verifier_model, draft_model, circuit, tokenizer, n_samples = 100, max_new_tokens = 60L) {
+  # runs speculative decoding experiments on a random sample of the dataset and reports metrics
   set.seed(42)
-  total_available <- as.integer(dataset$num_rows)
-  sample_indices <- sample(1:total_available, min(n_samples, total_available))
+  sample_indices = sample(1:as.integer(dataset$num_rows), min(n_samples, as.integer(dataset$num_rows)))
+  device = verifier_model$backbone$device
   
-  global_accepted <- 0
-  global_proposed <- 0
-  acceptance_list <- list()
-  generated_texts <- character(0)
-  prompt_texts    <- character(0)
+  # Import Python garbage collector
+  gc_py = import("gc")
   
-  device <- verifier_model$backbone$device
-
+  res_list = list()
   for (i in seq_along(sample_indices)) {
-    sample_idx <- sample_indices[i]
-    sample_data <- dataset[as.integer(sample_idx - 1)]
+    idx = sample_indices[i]
+    cat(sprintf("\n--- Sample %d / %d (Dataset Index %d) ---\n", i, length(sample_indices), idx))
     
-    cat(sprintf("\nESEMPIO %d/%d (Index: %d)\n", i, length(sample_indices), sample_idx))
+    #current chat
+    msg = dataset[as.integer(idx - 1)]$messages
+    p_txt = tokenizer$apply_chat_template(msg[1:(length(msg)-1)], chat_template = CHAT_TEMPLATE, tokenize = FALSE, add_generation_prompt = TRUE)
+    #first characters of the message
+    pfx = substr(msg[[length(msg)]]$content, 1, 10)
     
-    messages <- sample_data$messages
-    n_msgs <- length(messages)
-    prompt_msgs <- messages[1:(n_msgs-1)]
+    prompt_ids = tokenizer$encode(p_txt, add_special_tokens = FALSE, return_tensors = "pt")$to(device)
+    initial_decoder_ids = tokenizer$encode(pfx, add_special_tokens = FALSE, return_tensors = "pt")$to(device)
     
-    prompt_text <- tokenizer$apply_chat_template(prompt_msgs, chat_template=CHAT_TEMPLATE, tokenize=FALSE, add_generation_prompt=TRUE)
-    prompt_texts <- c(prompt_texts, prompt_text)
-    
-    target_full_text <- messages[[n_msgs]]$content
-    prefix_text <- substr(target_full_text, 1, 10)
-    
-    input_ids <- tokenizer$encode(prompt_text, return_tensors="pt")$to(device)
-    initial_decoder_ids <- tokenizer$encode(prefix_text, add_special_tokens=FALSE, return_tensors="pt")$to(device)
-    
-    res_obj <- generate_speculative(
-      verifier_model = verifier_model,
-      draft_model    = draft_model,
-      circuit        = circuit,
-      prompt_ids     = input_ids,
-      max_new_tokens = max_new_tokens,
-      tokenizer      = tokenizer,
-      initial_decoder_ids = initial_decoder_ids,
-      verbose = FALSE
+    res = generate_speculative(
+      verifier_model = verifier_model, draft_model = draft_model, 
+      prompt_ids = prompt_ids, 
+      circuit = circuit, tokenizer = tokenizer, 
+      initial_decoder_ids = initial_decoder_ids, 
+      max_new_tokens = max_new_tokens, verbose = TRUE
     )
     
-    acceptance_list[[i]] <- res_obj$round_accepted
-    final_text <- tokenizer$decode(as.integer(res_obj$tokens))
-    generated_texts <- c(generated_texts, final_text)
+    res_list[[i]] = list(
+      round_accepted = res$round_accepted, 
+      total_accepted = res$total_accepted, 
+      total_proposed = res$total_proposed, 
+      prompt_text = p_txt, 
+      generated_text = safe_decode(tokenizer, as.integer(res$tokens))
+    )
     
-    global_accepted <- global_accepted + res_obj$total_accepted
-    global_proposed <- global_proposed + res_obj$total_proposed
+    # Explicitly clear R and Python tensors/memory
+    rm(prompt_ids, initial_decoder_ids, res)
+    gc()
+    gc_py$collect()
     
-    cat(sprintf("[STATS] Round: %d | Mean Acceptance: %.2f%%\n", length(res_obj$round_accepted), res_obj$mean_acceptance * 100))
+    # flush device-specific GPU/MPS cache if available
+    tryCatch({
+      if (device$type == "mps") {
+        torch_py$mps$empty_cache()
+      }
+    }, error = function(e) {
+      if (grepl("mps", as.character(device))) {
+        torch_py$mps$empty_cache()
+      }
+    })
   }
   
-  # --- NA PADDING (Distinzione tra 0 accettati e round non avvenuti) ---
-  max_rounds <- max(sapply(acceptance_list, length))
-  results_matrix <- matrix(NA, nrow = length(acceptance_list), ncol = max_rounds)
-  for (i in seq_along(acceptance_list)) {
-    curr_len <- length(acceptance_list[[i]])
-    if (curr_len > 0) {
-      results_matrix[i, 1:curr_len] <- acceptance_list[[i]]
-    }
-  }
+  # compute metrics using the modular function
+  metrics = compute_speculative_decoding_metrics(res_list)
   
-  cat(sprintf("\n[SYSTEM] Experiment terminato. Global Acceptance: %.2f%%\n", (global_accepted / global_proposed) * 100))
+  cat(sprintf("\nglobal acceptance: %.2f%%\n", (metrics$global_accepted / metrics$global_proposed) * 100))
   
-  return(list(
-    acceptance_matrix = results_matrix,
-    generated_texts   = generated_texts,
-    prompt_texts      = prompt_texts
-  ))
+  list(acceptance_matrix = metrics$acceptance_matrix, generated_texts = metrics$generated_texts, prompt_texts = metrics$prompt_texts)
 }
 
+device = get_device()
+tokenizer = transformers$AutoTokenizer$from_pretrained(MODEL_ID)
 
-device <- get_device()
-tokenizer <- transformers$AutoTokenizer$from_pretrained(MODEL_ID)
+# Ensure dataset is available
+if (!exists("dataset")) {
+  cat("\n[SYSTEM] Dataset 'dataset' not found in workspace. Loading and splitting 'ai2-adapt-dev/flan_v2_converted'...\n")
+  splits = load_tulu_dataset("ai2-adapt-dev/flan_v2_converted", max_samples = 1000L)
+  dataset = splits$test
+}
 
-# ==============================================================================
-# FASE 1: EXPLORATORY DATA ANALYSIS (EDA)
-# ==============================================================================
-cat("\n", paste(rep("=", 60), collapse=""), "\n")
-cat("FASE 1: EXPLORATORY DATA ANALYSIS (EDA)\n")
-cat(paste(rep("=", 60), collapse=""), "\n")
+torch_py = import("torch")
 
-cat("[SYSTEM] Caricamento e filtraggio dataset...\n")
-dataset_full <- datasets_lib$load_dataset("allenai/tulu-3-sft-mixture", split="train")
-col_dict <- dataset_full$select_columns("source")$to_dict()
-indices <- which(col_dict[["source"]] == "ai2-adapt-dev/flan_v2_converted")
-dataset <- dataset_full$select(as.integer(indices - 1))
-
-# Analisi linguistica del ground truth (campione di 500)
-gt_stats <- analyze_dataset(dataset, max_samples = 500)
-
-cat("\n[OK] EDA Completata.\n")
-
-
-# ==============================================================================
-# FASE 2: INFERENCE & BENCHMARKING
-# ==============================================================================
-cat("\n", paste(rep("=", 60), collapse=""), "\n")
-cat("FASE 2: INFERENCE & BENCHMARKING\n")
-cat(paste(rep("=", 60), collapse=""), "\n")
-
-# Caricamento Verifier (Comune a tutti)
-VERIFIER_LORA_DIR <- "saved_models/byt5_standard_lora_verifier/byt5_standard_lora"
-cat("[SYSTEM] Inizializzazione Verifier Model...\n")
-verifier_model <- SpeculativeEngine(model_id = MODEL_ID, lora_path = VERIFIER_LORA_DIR)
+# verifier model initialization
+VERIFIER_LORA_DIR = "saved_models/byt5_standard_lora_phase0_v1"
+verifier_model = LLMWrapper(model_id = MODEL_ID, lora_path = VERIFIER_LORA_DIR, cheat = CHEAT)
 verifier_model$to(device)
 verifier_model$eval()
 
-# Contenitore per tutti i risultati
-all_results <- list()
-
-for (head_type in PROBABILISTIC_HEADS) {
-  cat(sprintf("\n>>> TEST ARCHITETTURA: %s <<<\n", toupper(head_type)))
+# accumulates per-head experiment results keyed by head_type
+all_results = list()
+get_inference_paths = function(head_type, window_size) {
+  # 1. Check if v1 reference models exist in saved_models
+  v1_lora = sprintf("saved_models/lora_%s_w%d_phase1_v1", head_type, window_size)
+  v1_weights = sprintf("saved_models/mtp_head_%s_w%d_phase1_v1.pth", head_type, window_size)
   
-  # Caricamento Modello di Draft specifico
-  paths <- get_model_paths(head_type, WINDOW_SIZE)
-  draft_model <- SpeculativeEngine(model_id = MODEL_ID, lora_path = paths$lora_dir)
-  
-  # Iniezione e caricamento pesi circuito
-  circuit <- init_probabilistic_circuit(head_type, WINDOW_SIZE, RANKS)
-  circuit$inject_head(draft_model) 
-  
-  if (file.exists(paths$weights_path)) {
-    cat(paste("Caricamento pesi MTP Head da:", paths$weights_path, "\n"))
-    state_dict <- torch_py$load(paths$weights_path, map_location = "cpu")
-    draft_model$heads$load_state_dict(state_dict)
-  } else {
-    cat(sprintf("[WARNING] Pesi non trovati a %s, uso inizializzazione casuale.\n", paths$weights_path))
+  if (file.exists(v1_weights) && file.exists(v1_lora)) {
+    return(list(lora_dir = v1_lora, weights_path = v1_weights))
   }
   
+  # 2. Check standard path in saved_models or legacy_models
+  lora_dir = sprintf("saved_models/lora_%s_w%d/mtp_backbone_lora_%s_w%d", head_type, window_size, head_type, window_size)
+  weights_path = sprintf("saved_models/mtp_head_%s_w%d_final.pth", head_type, window_size)
+  
+  if (!file.exists(weights_path) || !file.exists(lora_dir)) {
+    # Check legacy_models
+    legacy_lora = sprintf("legacy_models/lora_%s_w%d/mtp_backbone_lora_%s_w%d", head_type, window_size, head_type, window_size)
+    legacy_weights = sprintf("legacy_models/mtp_head_%s_w%d_final.pth", head_type, window_size)
+    if (file.exists(legacy_weights) && file.exists(legacy_lora)) {
+      lora_dir = legacy_lora
+      weights_path = legacy_weights
+    }
+  }
+  
+  # Fallbacks for specific custom paths in saved_models or legacy_models
+  if (!file.exists(weights_path) || !file.exists(lora_dir)) {
+    # Check Phase 1 in legacy_models
+    alt_lora = sprintf("legacy_models/lora_%s_w%d_phase1", head_type, window_size)
+    alt_weights = sprintf("legacy_models/mtp_head_%s_w%d_phase1.pth", head_type, window_size)
+    if (file.exists(alt_weights) && file.exists(alt_lora)) {
+      lora_dir = alt_lora
+      weights_path = alt_weights
+    }
+  }
+  
+  return(list(lora_dir = lora_dir, weights_path = weights_path))
+}
+
+for (head_type in PROBABILISTIC_HEADS) {
+  cat(sprintf("\nLoading draft model for: %s\n", head_type))
+  paths = get_inference_paths(head_type, WINDOW_SIZE)
+  
+  draft_model = LLMWrapper(
+    model_id = MODEL_ID, 
+    head_type = head_type, 
+    window_size = WINDOW_SIZE, 
+    ranks = RANKS, 
+    lora_path = paths$lora_dir,
+    cheat = CHEAT
+  )
+   
+  # load pretrained MTP head weights onto CPU before moving to target device
+  if (file.exists(paths$weights_path)) {
+    draft_model$load_weights(paths$weights_path, device = "cpu", shift_offset_minus_1 = SHIFT_OFFSET_MINUS_1)
+  }
   draft_model$to(device)
   draft_model$eval()
   
-  # Esecuzione Esperimento
-  all_results[[head_type]] <- run_inference_experiment(
+  all_results[[head_type]] = run_inference_experiment(
     dataset = dataset,
     verifier_model = verifier_model,
     draft_model = draft_model,
-    circuit = circuit,
+    circuit = draft_model$circuit,
     tokenizer = tokenizer,
     n_samples = N_SAMPLES
   )
-  
-  # Pulizia memoria tra i test
-  rm(draft_model, circuit)
+  rm(draft_model)
   gc()
 }
 
-
-# ==============================================================================
-# SALVATAGGIO DEI RISULTATI
-# ==============================================================================
-output_file <- sprintf("results_benchmark_w%d.rds", WINDOW_SIZE)
+# persist all head results to disk for later analysis
+output_dir = "benchmark_results"
+if (!dir.exists(output_dir)) dir.create(output_dir)
+output_file = file.path(output_dir, sprintf("results_benchmark_w%d.rds", WINDOW_SIZE))
 saveRDS(all_results, output_file)
 
-cat(sprintf("\n[SYSTEM] Pipeline completata. Risultati salvati in: %s\n", output_file))
-cat("[SYSTEM] Usa 'Rscript analyze_results.R' per visualizzare il report dettagliato.\n")

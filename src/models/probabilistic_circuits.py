@@ -4,17 +4,29 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 import numpy as np
 
+def stable_logsumexp(x, dim, keepdim=False):
+    """
+    A stable manual implementation of logsumexp to prevent MPS backend compiler deadlocks
+    on Apple Silicon during the backward pass.
+    """
+    max_val = x.max(dim=dim, keepdim=True).values
+    result = max_val + torch.log(torch.exp(x - max_val).sum(dim=dim, keepdim=True))
+    if not keepdim:
+        result = result.squeeze(dim)
+    return result
+
 class FF(nn.Module):
     def __init__(self, embedding_size, vocabulary_size, window_size):
         super().__init__()
         self.window_size = window_size
-        self.emission_projs = nn.ModuleList([
+        # input_units_phi parameterizes the categorical distributions over individual tokens.
+        self.input_units_phi = nn.ModuleList([
             nn.Linear(embedding_size, vocabulary_size) for _ in range(window_size)
         ])
     
     def forward(self, embeddings):
         return torch.stack([
-            proj(embeddings) for proj in self.emission_projs
+            proj(embeddings) for proj in self.input_units_phi
         ], dim=2)
 
 
@@ -26,56 +38,59 @@ class CanonicPolyidiac(nn.Module):
         self.vocabulary_size = vocabulary_size
         self.is_log_probs = True
 
-        
-        self.gate = nn.Linear(embedding_size, ranks)
-        self.emission_projs = nn.Linear(embedding_size, ranks * window_size * vocabulary_size)
+        # sum_unit_omega parameterizes the root sum unit weights omega_j = q(z_j | x_{\le t})
+        self.sum_unit_omega = nn.Linear(embedding_size, ranks)
+        # input_units_phi parameterizes the r input units per token (phi emissions)
+        self.input_units_phi = nn.Linear(embedding_size, ranks * window_size * vocabulary_size)
 
-        # --- INIZIALIZZAZIONE ---
+        # --- INITIALIZATION ---
         with torch.no_grad():
-            # Inizializzazione Gate (Uniforme: Pesi = 0, Bias = 0)
-            nn.init.zeros_(self.gate.weight)
-            nn.init.zeros_(self.gate.bias)
+            # Initialization (Uniform: Weights = 0, Bias = 0)
+            nn.init.zeros_(self.sum_unit_omega.weight)
+            nn.init.zeros_(self.sum_unit_omega.bias)
     
     def forward(self, embeddings):
         batch_size, seq_len, _ = embeddings.shape
         
-        gate_logits = self.gate(embeddings) # [batch, seq_len, ranks]
+        gate_logits = self.sum_unit_omega(embeddings) # [batch, seq_len, ranks]
         log_weights = F.log_softmax(gate_logits, dim=-1)
 
-        flat_emissions = self.emission_projs(embeddings)
+        flat_input_units = self.input_units_phi(embeddings)
         
-        emissions = flat_emissions.view(
+        input_units = flat_input_units.view(
             batch_size, seq_len, self.ranks, self.window_size, self.vocabulary_size
         )
-        log_token_probs = F.log_softmax(emissions, dim=-1)
+        log_token_probs = F.log_softmax(input_units, dim=-1)
         
-        log_weights_expanded = log_weights.unsqueeze(3).unsqueeze(4)
-
-        log_marginal_probs = torch.logsumexp(log_weights_expanded + log_token_probs, dim=2)
+        # Explicit Sum Unit over Ranks to compute the marginal distribution for each step in the window:
+        # P(x_{t+j} | x_{\le t}) = \sum_r q(z = r | x_{\le t}) * P(x_{t+j} | z = r)
+        # In log-space: log_marginal_probs = logsumexp(log_weights + log_token_probs, dim=2)
+        log_weights_expanded = log_weights.unsqueeze(3).unsqueeze(4) # [batch_size, seq_len, ranks, 1, 1]
+        log_marginal_probs = stable_logsumexp(log_weights_expanded + log_token_probs, dim=2) # [batch_size, seq_len, window_size, vocab_size]
         
         return log_marginal_probs
 
-    @torch.no_grad() # Cruciale: spegne i gradienti per velocizzare
+    @torch.no_grad()
     def generate_draft(self, embeddings):
-
         last_emb = embeddings[:, -1:, :]
         batch_size = last_emb.shape[0]
         
-        gate_logits = self.gate(last_emb) # [batch, 1, ranks]
+        gate_logits = self.sum_unit_omega(last_emb) # [batch, 1, ranks]
         gate_probs = F.softmax(gate_logits, dim=-1).squeeze(1) # [batch, ranks]
         
-        selected_ranks = Categorical(probs=gate_probs).sample() # [batch]
+        # CPU Fallback for Categorical sampling due to PyTorch MPS backend bug
+        selected_ranks = Categorical(probs=gate_probs.to("cpu")).sample().to(embeddings.device) # [batch]
         
-        flat_emissions = self.emission_projs(last_emb)
-        emissions = flat_emissions.view(
+        flat_input_units = self.input_units_phi(last_emb)
+        input_units = flat_input_units.view(
             batch_size, 1, self.ranks, self.window_size, self.vocabulary_size
         )
         
         batch_indices = torch.arange(batch_size, device=embeddings.device)
-        selected_logits = emissions[batch_indices, 0, selected_ranks, :, :]
+        selected_logits = input_units[batch_indices, 0, selected_ranks, :, :]
         
         token_probs = F.softmax(selected_logits, dim=-1)
-        draft_tokens = Categorical(probs=token_probs).sample() # [batch, window_size]
+        draft_tokens = Categorical(probs=token_probs.to("cpu")).sample().to(embeddings.device) # [batch, window_size]
         
         return draft_tokens
 
@@ -83,8 +98,7 @@ class CanonicPolyidiac(nn.Module):
 class MTPC_HMM(nn.Module):
     def __init__(self, embedding_size, vocabulary_size, emission_matrix=None, transition_matrix=None, window_size=16, ranks=32):
         """
-        Testa HMM Contestuale e Inomogenea con Identity Initialisation e Init Uniforme.
-        Valori paper: window_size=16, ranks=32.
+        Contextual Inhomogeneous HMM Speculative Head aligning with paper nomenclature.
         """
         super().__init__()
         self.window_size = window_size
@@ -93,58 +107,58 @@ class MTPC_HMM(nn.Module):
         
         self.register_buffer("step_counter", torch.tensor(0))
         
-        # --- CREAZIONE DEI LAYER ---
-        self.init_gate = nn.Linear(embedding_size, ranks)
-        self.emissions = nn.Linear(embedding_size, window_size * ranks * vocabulary_size)
-        self.transitions = nn.Linear(embedding_size, (window_size - 1) * ranks * ranks)
+        # --- LAYER CREATION ---
+        # sum_unit_omega_init parameterizes the root sum unit for the first latent state z_1
+        self.sum_unit_omega_init = nn.Linear(embedding_size, ranks)
+        # input_units_phi parameterizes the input unit distributions q_phi(x_{t+i} | z_i, x_{\le t})
+        self.input_units_phi = nn.Linear(embedding_size, window_size * ranks * vocabulary_size)
+        # sum_unit_omega_transitions parameterizes transition probabilities q(z_i | z_{i-1}, x_{\le t})
+        self.sum_unit_omega_transitions = nn.Linear(embedding_size, (window_size - 1) * ranks * ranks)
 
-        # --- INIZIALIZZAZIONE ---
+        # --- INITIALIZATION ---
         with torch.no_grad():
-            
-            # 1. Inizializzazione Init Gate (Uniforme: Pesi = 0, Bias = 0)
-            nn.init.zeros_(self.init_gate.weight)
-            nn.init.zeros_(self.init_gate.bias)
+            # 1. Initialization (Uniform: Weights = 0, Bias = 0)
+            nn.init.zeros_(self.sum_unit_omega_init.weight)
+            nn.init.zeros_(self.sum_unit_omega_init.bias)
 
-            # 2. Inizializzazione Emissioni
+            # 2. Emission matrix initialization (from backbone)
             if emission_matrix is not None:
                 e_tensor = torch.tensor(emission_matrix, dtype=torch.float)
-                self.emissions.weight.copy_(e_tensor)
-                nn.init.zeros_(self.emissions.bias)
+                self.input_units_phi.weight.copy_(e_tensor)
+                nn.init.zeros_(self.input_units_phi.bias)
                 
-            # 3. Inizializzazione Transizioni
+            # 3. Transition matrix initialization
             if transition_matrix is not None:
                 t_tensor = torch.tensor(transition_matrix, dtype=torch.float)
-                self.transitions.weight.copy_(t_tensor)
-                nn.init.zeros_(self.transitions.bias)
+                self.sum_unit_omega_transitions.weight.copy_(t_tensor)
+                nn.init.zeros_(self.sum_unit_omega_transitions.bias)
                 self._apply_identity_init(override_weights=False)
             else:
                 self._apply_identity_init(override_weights=True)
 
     def _apply_identity_init(self, override_weights=True):
         if override_weights:
-            nn.init.normal_(self.transitions.weight, mean=0.0, std=1e-4)
+            nn.init.normal_(self.sum_unit_omega_transitions.weight, mean=0.0, std=1e-4)
         
         bias_tensor = torch.zeros(self.window_size - 1, self.ranks, self.ranks)
         
-        # Logit alto per forzare l'identità dopo il Softmax
+        # Logit to force identity transitions after Softmax
         bias_tensor.diagonal(dim1=-2, dim2=-1).fill_(5.0)
         
         with torch.no_grad():
-            self.transitions.bias.copy_(bias_tensor.flatten())
-            
+            self.sum_unit_omega_transitions.bias.copy_(bias_tensor.flatten())
 
     def forward(self, embeddings):
-
         batch_size, seq_len, _ = embeddings.shape
         
-        log_alpha = F.log_softmax(self.init_gate(embeddings), dim=-1) # [B, S, R]
+        log_alpha = F.log_softmax(self.sum_unit_omega_init(embeddings), dim=-1) # [B, S, R]
         
-        flat_emiss = self.emissions(embeddings)
-        log_emiss = F.log_softmax(flat_emiss.view(
+        flat_input_units = self.input_units_phi(embeddings)
+        log_emiss = F.log_softmax(flat_input_units.view(
             batch_size, seq_len, self.window_size, self.ranks, self.vocabulary_size
         ), dim=-1)
         
-        flat_trans = self.transitions(embeddings)
+        flat_trans = self.sum_unit_omega_transitions(embeddings)
         log_trans = F.log_softmax(flat_trans.view(
             batch_size, seq_len, self.window_size - 1, self.ranks, self.ranks
         ), dim=-1) # dim -2: R_prev, dim -1: R_next
@@ -165,12 +179,12 @@ class MTPC_HMM(nn.Module):
 
         for t in range(self.window_size):
             curr_emission = log_emiss[:, :, t, :, :] # [B, S, R, Vocab]
-            step_prob = torch.logsumexp(log_alpha.unsqueeze(-1) + curr_emission, dim=2)
+            step_prob = stable_logsumexp(log_alpha.unsqueeze(-1) + curr_emission, dim=2)
             log_marginal_probs.append(step_prob)
 
             if t < self.window_size - 1:
                 curr_trans = log_trans[:, :, t, :, :] 
-                log_alpha = torch.logsumexp(log_alpha.unsqueeze(-1) + curr_trans, dim=2)
+                log_alpha = stable_logsumexp(log_alpha.unsqueeze(-1) + curr_trans, dim=2)
 
         return torch.stack(log_marginal_probs, dim=2) # [B, S, W, Vocab]
 
@@ -179,14 +193,14 @@ class MTPC_HMM(nn.Module):
         last_emb = embeddings[:, -1:, :]
         batch_size = last_emb.shape[0]
         
-        init_probs = F.softmax(self.init_gate(last_emb).squeeze(1), dim=-1)
+        init_probs = F.softmax(self.sum_unit_omega_init(last_emb).squeeze(1), dim=-1)
         
-        flat_emiss = self.emissions(last_emb)
-        emiss_probs = F.softmax(flat_emiss.view(
+        flat_input_units = self.input_units_phi(last_emb)
+        emiss_probs = F.softmax(flat_input_units.view(
             batch_size, self.window_size, self.ranks, self.vocabulary_size
         ), dim=-1)
         
-        flat_trans = self.transitions(last_emb)
+        flat_trans = self.sum_unit_omega_transitions(last_emb)
         trans_probs = F.softmax(flat_trans.view(
             batch_size, self.window_size - 1, self.ranks, self.ranks
         ), dim=-1)
@@ -199,36 +213,34 @@ class MTPC_HMM(nn.Module):
 
     @torch.no_grad()
     def generate_draft(self, embeddings):
-        last_emb = embeddings[:, -1:, :] # Prendi solo l'ultimo token
+        last_emb = embeddings[:, -1:, :]
         batch_size = last_emb.shape[0]
         batch_indices = torch.arange(batch_size, device=embeddings.device)
         
-
-        init_probs = F.softmax(self.init_gate(last_emb).squeeze(1), dim=-1)
+        init_probs = F.softmax(self.sum_unit_omega_init(last_emb).squeeze(1), dim=-1)
         
-        flat_emiss = self.emissions(last_emb)
-        emiss_probs = F.softmax(flat_emiss.view(
+        flat_input_units = self.input_units_phi(last_emb)
+        emiss_probs = F.softmax(flat_input_units.view(
             batch_size, self.window_size, self.ranks, self.vocabulary_size
         ), dim=-1)
         
-        flat_trans = self.transitions(last_emb)
+        flat_trans = self.sum_unit_omega_transitions(last_emb)
         trans_probs = F.softmax(flat_trans.view(
             batch_size, self.window_size - 1, self.ranks, self.ranks
         ), dim=-1)
         
         draft_tokens = []
         
-        z_t = Categorical(probs=init_probs).sample()
+        # CPU Fallback for Categorical sampling due to PyTorch MPS backend bug
+        z_t = Categorical(probs=init_probs.to("cpu")).sample().to(embeddings.device)
         
         for t in range(self.window_size):
-            # Step 2: Estrazione del token x_t condizionato a z_t
             curr_emiss = emiss_probs[batch_indices, t, z_t, :]
-            x_t = Categorical(probs=curr_emiss).sample()
+            x_t = Categorical(probs=curr_emiss.to("cpu")).sample().to(embeddings.device)
             draft_tokens.append(x_t)
             
-            # Step 3: Transizione allo stato z_{t+1} (catena di Markov)
             if t < self.window_size - 1:
                 curr_trans = trans_probs[batch_indices, t, z_t, :]
-                z_t = Categorical(probs=curr_trans).sample()
+                z_t = Categorical(probs=curr_trans.to("cpu")).sample().to(embeddings.device)
                 
         return torch.stack(draft_tokens, dim=1) # [B, W]

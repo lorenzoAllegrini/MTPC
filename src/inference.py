@@ -7,20 +7,44 @@ from torch.utils.data import DataLoader
 
 from models.probabilistic_circuits import FF, CanonicPolyidiac, MTPC_HMM
 from models.mtp_llm import MTP_LLM
-from utils import MTPChatDataset, get_byt5_preprocess_function, load_tulu_dataset, CHAT_TEMPLATE
-
-
-HEAD_CLASS = CanonicPolyidiac
-MODEL_ID = "google/byt5-small"
-WINDOW_SIZE = 6
-MAX_LEN = 2048
-NUM_VAL_SAMPLES = 200
-LORA_PATH = "saved_models/lora_cp_w6/mtp_backbone_lora_cp_w6"
-WEIGHTS_PATH = "saved_models/mtp_head_cp_w6_final.pth"
-TASK_FILTER = "ai2-adapt-dev/flan_v2_converted"
+from utils import MTPChatDataset, get_byt5_preprocess_function, load_tulu_dataset, CHAT_TEMPLATE, get_model_paths_python
 
 
 if __name__ == "__main__":
+    import argparse
+    import os
+    
+    parser = argparse.ArgumentParser(description="MTP Speculative Decoding Qualitative Inference")
+    parser.add_argument("--head", type=str, choices=["cp", "hmm", "ff"], default="cp", help="Target head class (cp, hmm, ff)")
+    parser.add_argument("--window_size", type=int, default=4, help="Speculative window size")
+    parser.add_argument("--model_id", type=str, default="google/byt5-small", help="Pretrained model ID")
+    parser.add_argument("--num_samples", type=int, default=100, help="Number of validation samples to test")
+    parser.add_argument("--lora_path", type=str, default=None, help="Custom LoRA path (overrides resolved path)")
+    parser.add_argument("--weights_path", type=str, default=None, help="Custom weights path (overrides resolved path)")
+    args = parser.parse_args()
+    
+    MODEL_ID = args.model_id
+    WINDOW_SIZE = args.window_size
+    NUM_VAL_SAMPLES = args.num_samples
+    MAX_LEN = 2048
+    TASK_FILTER = "ai2-adapt-dev/flan_v2_converted"
+    
+    if args.head == "cp":
+        HEAD_CLASS = CanonicPolyidiac
+    elif args.head == "hmm":
+        HEAD_CLASS = MTPC_HMM
+    elif args.head == "ff":
+        HEAD_CLASS = FF
+        
+    save_dir = "saved_models"
+    LORA_PATH, WEIGHTS_PATH = get_model_paths_python(args.head, args.window_size, save_dir)
+            
+    # Override resolved paths if user provided custom paths
+    if args.lora_path is not None:
+        LORA_PATH = args.lora_path
+    if args.weights_path is not None:
+        WEIGHTS_PATH = args.weights_path
+        
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     head_name = HEAD_CLASS.__name__
     print(f"Device: {device}")
@@ -42,7 +66,28 @@ if __name__ == "__main__":
     
     # Load weights into model.heads (matching R's load_model_weights)
     state_dict = torch.load(WEIGHTS_PATH, map_location=device, weights_only=True)
-    model.heads.load_state_dict(state_dict)
+    
+    # Remap old keys to new paper-aligned keys for backward compatibility
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_k = k
+        if k.startswith("gate."):
+            new_k = k.replace("gate.", "sum_unit_omega.", 1)
+        elif k.startswith("emission_projs."):
+            new_k = k.replace("emission_projs.", "input_units_phi.", 1)
+        elif k.startswith("init_gate."):
+            new_k = k.replace("init_gate.", "sum_unit_omega_init.", 1)
+        elif k.startswith("emissions."):
+            new_k = k.replace("emissions.", "input_units_phi.", 1)
+        elif k.startswith("transitions."):
+            new_k = k.replace("transitions.", "sum_unit_omega_transitions.", 1)
+        elif k.startswith("emission_") and (".weight" in k or ".bias" in k):
+            parts = k.split(".", 1)
+            num = parts[0].split("_")[1]
+            new_k = f"input_units_phi_{num}.{parts[1]}"
+        new_state_dict[new_k] = v
+        
+    model.heads.load_state_dict(new_state_dict)
     model.to(device)
     model.eval()
     print("Model loaded successfully!")
@@ -83,7 +128,8 @@ if __name__ == "__main__":
             attention_mask = batch['attention_mask'].to(device)
             labels = batch['labels'].to(device)
             
-            _, mtp_logits, hidden_states = model(input_ids, attention_mask=attention_mask)
+            # Forward pass to get logits and hidden states (passing labels to prevent leakage and align decoder)
+            _, mtp_logits, hidden_states = model(input_ids, attention_mask=attention_mask, labels=labels)
             
             valid_indices = (labels[0] != -100).nonzero(as_tuple=True)[0]
             
@@ -93,7 +139,7 @@ if __name__ == "__main__":
             test_idx = valid_indices[len(valid_indices) // 2].item()
             
             # Context up to test_idx (input for the head at test_idx)
-            context_ids = input_ids[0, :test_idx + 1]
+            context_ids = input_ids[0, :test_idx]
             
             # True next tokens (ground truth for window)
             true_ids = labels[0, test_idx + 1 : test_idx + 1 + WINDOW_SIZE]

@@ -69,36 +69,37 @@ def train_cp_phase2():
             W = WINDOW_SIZE
             R = RANKS
             
-            # CP Head ha 'gate' e 'emission_projs'
-            # emission_projs.weight shape: [R*W*V, H]
+            # CP Head has 'sum_unit_omega' and 'input_units_phi'
+            # input_units_phi.weight shape: [R*W*V, H]
             new_emissions = torch.zeros(W, R, V, H, device=device, dtype=best_dtype)
             
             for t in range(W):
-                # La testa FF salvata ha chiavi 'emission_1.weight', 'emission_2.weight'...
-                ff_key = f'emission_{t+1}.weight'
+                # Supports both new and old state_dict keys for maximum robustness
+                ff_key = f'input_units_phi_{t+1}.weight'
+                old_ff_key = f'emission_{t+1}.weight'
                 if ff_key in ff_state_dict:
                     ff_weight = ff_state_dict[ff_key].to(device=device, dtype=best_dtype) # [V, H]
-                    # Espandiamo il peso FF su tutti i Ranks della CP
+                    new_emissions[t, :, :, :] = ff_weight.unsqueeze(0).expand(R, V, H)
+                elif old_ff_key in ff_state_dict:
+                    ff_weight = ff_state_dict[old_ff_key].to(device=device, dtype=best_dtype) # [V, H]
                     new_emissions[t, :, :, :] = ff_weight.unsqueeze(0).expand(R, V, H)
                 else:
-                    print(f"  [WARNING] Chiave {ff_key} non trovata nello state_dict FF.")
+                    print(f"  [WARNING] Key {ff_key} or {old_ff_key} not found in FF state_dict.")
             
-            # Carichiamo i pesi nel layer emission_projs della CP
-            # Dobbiamo permutare e fare reshape per matchare il Linear layer (Output, Input)
-            # emissions.view(B, S, R, W, V) implica che l'output del linear è R*W*V
-            # La sequenza di view in probabilistic_circuits.py è (R, W, V)
+            # Load weights into the input_units_phi layer of CP
+            # We permute and reshape to match the Linear layer (Output, Input)
             reshaped_emissions = new_emissions.permute(1, 0, 2, 3).reshape(-1, H)
             
-            # Symmetry Breaking: aggiungiamo un piccolo rumore per evitare che i Rank siano identici
+            # Symmetry Breaking: add small noise to prevent identical rank initializations
             noise = torch.randn_like(reshaped_emissions) * 1e-3
             reshaped_emissions += noise
             
-            model._circuit.emission_projs.weight.copy_(reshaped_emissions)
-            nn.init.zeros_(model._circuit.emission_projs.bias)
+            model._circuit.input_units_phi.weight.copy_(reshaped_emissions)
+            nn.init.zeros_(model._circuit.input_units_phi.bias)
             
-            # Inizializziamo il gate in modo neutro (uniforme)
-            nn.init.zeros_(model._circuit.gate.weight)
-            nn.init.zeros_(model._circuit.gate.bias)
+            # Initialize sum_unit_omega in a neutral (uniform) way
+            nn.init.zeros_(model._circuit.sum_unit_omega.weight)
+            nn.init.zeros_(model._circuit.sum_unit_omega.bias)
             
         print("  [OK] Pesi FF trasferiti con successo alla testa CP.")
     else:
@@ -130,7 +131,7 @@ def train_cp_phase2():
             optimizer.zero_grad()
             
             # Forward pass (manuale come su Colab)
-            _, mtp_logits, _ = model(input_ids, attention_mask=attention_mask)
+            _, mtp_logits, _ = model(input_ids, attention_mask=attention_mask, labels=labels)
             
             # Calcolo Loss
             from utils import compute_mtpc_loss
@@ -138,7 +139,7 @@ def train_cp_phase2():
                 mtp_logits, 
                 labels, 
                 window_size=WINDOW_SIZE, 
-                gamma=0.9, 
+                gamma=0.8, 
                 is_log_probs=is_log_probs
             )
             

@@ -4,9 +4,37 @@ import torch.nn.functional as F
 from datasets import load_dataset
 from torch.utils.data import Dataset
 
+import os
+
 sys.modules['torchvision'] = None
 
 CHAT_TEMPLATE = "{% for message in messages %}{% if message['role'] == 'user' %}{{ '<|user|>\n' + message['content'] + '\n' }}{% elif message['role'] == 'assistant' %}{{ '<|assistant|>\n' + message['content'] + '<|end|>\n' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>\n' }}{% endif %}"
+
+def get_model_paths_python(head_type, window_size, save_dir):
+    # head_type is "cp", "hmm", "ff"
+    # Returns a tuple of (lora_dir, weights_path)
+    lora_dir = os.path.join(save_dir, f"lora_{head_type}_w{window_size}", f"mtp_backbone_lora_{head_type}_w{window_size}")
+    weights_path = os.path.join(save_dir, f"mtp_head_{head_type}_w{window_size}_final.pth")
+    
+    # Fallback to old custom names if standard doesn't exist
+    if not os.path.exists(weights_path) or not os.path.exists(lora_dir):
+        if head_type == "cp" and window_size == 4:
+            alt_lora = os.path.join(save_dir, "mtp_backbone_lora_canonicpolyidiac_w4_ft", "mtp_backbone_lora_canonicpolyidiac_w4_ft")
+            alt_weights = os.path.join(save_dir, "mtp_head_canonicpolyidiac_w4_ft.pth")
+            if os.path.exists(alt_weights):
+                lora_dir, weights_path = alt_lora, alt_weights
+        elif head_type == "hmm" and window_size == 4:
+            alt_lora = os.path.join(save_dir, "lora_hmm_w4", "mtp_backbone_lora_mtpc_hmm_w4_ft")
+            alt_weights = os.path.join(save_dir, "mtp_head_mtpc_hmm_w4_ft.pth")
+            if os.path.exists(alt_weights):
+                lora_dir, weights_path = alt_lora, alt_weights
+        elif head_type == "ff" and window_size == 4:
+            alt_lora = os.path.join(save_dir, "lora_ff_w4", "mtp_backbone_lora_ff_w4")
+            alt_weights = os.path.join(save_dir, "mtp_head_ff_w4_final.pth")
+            if os.path.exists(alt_weights):
+                lora_dir, weights_path = alt_lora, alt_weights
+                
+    return lora_dir, weights_path
 
 class MTPChatDataset(Dataset):
 
@@ -24,7 +52,7 @@ class MTPChatDataset(Dataset):
             'labels': torch.tensor(item['labels'], dtype=torch.long)
         }
 
-def compute_mtpc_loss(mtp_logits, labels, window_size, gamma=0.9, ignore_index=-100, is_log_probs=False):
+def compute_mtpc_loss(mtp_logits, labels, window_size, gamma=0.8, ignore_index=-100, is_log_probs=False):
     combined_loss = 0.0
     for j in range(1, window_size + 1):
         current_logits = mtp_logits[:, :-j, j-1, :] 
@@ -71,6 +99,14 @@ def evabyte_encode(text, max_length):
 
 
 
+import re
+
+def clean_content(content):
+    # Strip raw control and template sequences to prevent the model from learning them
+    cleaned = re.sub(r'<\|(?:user|assistant|end|system|end_of_text|endoftext|pad)\|>\n?', '', content)
+    cleaned = re.sub(r'<\/?s>', '', cleaned)
+    return cleaned.strip()
+
 def get_byt5_preprocess_function(tokenizer, max_length, template_string):
     def preprocess_function(examples):
         batch_input_ids = []
@@ -78,8 +114,16 @@ def get_byt5_preprocess_function(tokenizer, max_length, template_string):
         batch_labels = []
         
         for conversation in examples['messages']:
+            # Create a cleaned version of the messages to avoid corrupting labels
+            cleaned_conversation = []
+            for msg in conversation:
+                cleaned_conversation.append({
+                    'role': msg['role'],
+                    'content': clean_content(msg['content'])
+                })
+            
             full_text = tokenizer.apply_chat_template(
-                conversation, chat_template=template_string, tokenize=False, add_generation_prompt=False
+                cleaned_conversation, chat_template=template_string, tokenize=False, add_generation_prompt=False
             )
             
             encoding = tokenizer(
@@ -92,9 +136,9 @@ def get_byt5_preprocess_function(tokenizer, max_length, template_string):
             labels = list(input_ids)
             
             current_offset = 0
-            for msg in conversation:
+            for msg in cleaned_conversation:
                 prefix = f"<|{msg['role']}|>\n"
-                suffix = "<|end|>\n"
+                suffix = "<|end|>\n" if msg['role'] == 'assistant' else "\n"
                 content = msg['content']
                 msg_text = prefix + content + suffix
                 
