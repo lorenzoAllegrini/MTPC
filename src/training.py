@@ -616,25 +616,33 @@ def main():
         # Swap head to Feed-Forward and initialize emissions
         swap_model_head(model, FF, window_size, ranks, device)
         
+        # Resume from a previously-trained FF head if one exists, so re-running on more data
+        # CONTINUES instead of restarting. Priority: explicit path > final > phase-1 checkpoint.
+        # (To also keep the backbone progress, run with --skip_phase_0 true so the matching FF
+        # LoRA backbone is reloaded; otherwise the head lands on a freshly re-trained backbone.)
         loaded_ff_head = False
-        if True:
-            _, ff_weights_path = get_model_paths_python("ff", window_size, save_dir)
-            if args.head_weights_path:
-                ff_weights_path = args.head_weights_path
-            elif not os.path.exists(ff_weights_path) and args.shift_offset:
-                _, alt_path = get_model_paths_python("ff", window_size + 1, save_dir)
-                if os.path.exists(alt_path):
-                    ff_weights_path = alt_path
-                    
-            if os.path.exists(ff_weights_path):
-                print(f"[SYSTEM] Loading existing FF head weights from {ff_weights_path} for continued training...")
+        _, ff_final_path = get_model_paths_python("ff", window_size, save_dir)
+        ff_candidates = []
+        if args.head_weights_path:
+            ff_candidates.append(args.head_weights_path)
+        ff_candidates.append(ff_final_path)
+        ff_candidates.append(os.path.join(save_dir, f"mtp_head_ff_w{window_size}_phase1.pth"))
+        if args.shift_offset:
+            _, alt_path = get_model_paths_python("ff", window_size + 1, save_dir)
+            ff_candidates.append(alt_path)
+
+        for cand in ff_candidates:
+            if cand and os.path.exists(cand):
+                print(f"[SYSTEM] Resuming Phase 1 from existing FF head: {cand}")
                 try:
-                    load_head_weights(model.heads, ff_weights_path, device, shift_offset_minus_1=args.shift_offset, target_window_size=window_size, ranks=ranks)
+                    load_head_weights(model.heads, cand, device, shift_offset_minus_1=args.shift_offset, target_window_size=window_size, ranks=ranks)
                     loaded_ff_head = True
+                    break
                 except Exception as e:
-                    print(f"[WARNING] Failed to load existing FF head weights: {e}. Initializing from backbone STP.")
-                    
+                    print(f"[WARNING] Failed to load FF head weights from {cand}: {e}")
+
         if not loaded_ff_head:
+            print("[SYSTEM] No existing FF head found; initializing emissions from backbone STP.")
             init_emissions_from_stp(model, window_size, ranks)
         
         model.backbone.train()
