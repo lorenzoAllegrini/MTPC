@@ -3,12 +3,15 @@ library(reticulate)
 self_speculative_decoding_step = function(verifier_model, draft_model, prompt_ids, decoder_ids, circuit, lookahead_k = 4, draft_encoder_outputs = NULL, verifier_encoder_outputs = NULL, attention_mask = NULL, tokenizer = NULL, verbose = FALSE) {
   # function that recreates the novel self speculative decoding introduced in the paper, pag 19
 
-  #compute last embedding 
+  #compute last embedding
   hidden_states = llm_get_hidden_states(draft_model, prompt_ids, decoder_ids, attention_mask = attention_mask, encoder_outputs = draft_encoder_outputs)$x
 
-  #ancestral sampling of drafted token given the hidden state
-  probs = circuit$get_draft_probs(draft_model, hidden_states)
-  drafted_tokens = circuit$generate_draft(probs) 
+  # draft from the second-to-last hidden state: the MTP head is trained one position ahead
+  # (labels shifted +1), so drafting from the last hidden state would predict one token too
+  # far and misalign with the verifier (which scores from position L-1), killing acceptance.
+  L_hs = as.integer(hidden_states$size(1L))
+  probs = circuit$get_draft_probs(draft_model, hidden_states$narrow(1L, 0L, L_hs - 1L))
+  drafted_tokens = circuit$generate_draft(probs)
   
   if (!is.null(tokenizer) && verbose) {draft_str = safe_decode(tokenizer, as.integer(drafted_tokens)); cat(sprintf(" drafted tokens: '%s'\n", draft_str))}
 
