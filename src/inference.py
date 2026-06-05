@@ -21,6 +21,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_samples", type=int, default=100, help="Number of validation samples to test")
     parser.add_argument("--lora_path", type=str, default=None, help="Custom LoRA path (overrides resolved path)")
     parser.add_argument("--weights_path", type=str, default=None, help="Custom weights path (overrides resolved path)")
+    parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "mps", "cpu"], help="Compute device (default: cuda).")
     args = parser.parse_args()
     
     MODEL_ID = args.model_id
@@ -45,7 +46,15 @@ if __name__ == "__main__":
     if args.weights_path is not None:
         WEIGHTS_PATH = args.weights_path
         
-    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    # Use the requested device, falling back gracefully if it is unavailable.
+    if args.device == "cuda" and not torch.cuda.is_available():
+        fallback = "mps" if torch.backends.mps.is_available() else "cpu"
+        print(f"[WARNING] --device cuda requested but CUDA is unavailable; using '{fallback}'.")
+        args.device = fallback
+    elif args.device == "mps" and not torch.backends.mps.is_available():
+        print("[WARNING] --device mps requested but MPS is unavailable; using 'cpu'.")
+        args.device = "cpu"
+    device = torch.device(args.device)
     head_name = HEAD_CLASS.__name__
     print(f"Device: {device}")
     print(f"MTP Head: {head_name}")

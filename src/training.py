@@ -308,11 +308,20 @@ def main():
     parser.add_argument("--lora_path", type=str, default=None, help="Custom path to LoRA adapter checkpoint directory to load.")
     parser.add_argument("--head_weights_path", type=str, default=None, help="Custom path to speculative head weights .pth file to load.")
     parser.add_argument("--cheat", action="store_true", help="Enable cheating mode (feed generated tokens to encoder during SFT and validation).")
+    parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "mps", "cpu"], help="Compute device (default: cuda).")
     args = parser.parse_args()
     args.use_pretrain = (args.use_pretrain == "true")
 
     model_id = args.model_id
-    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    # Use the requested device, falling back gracefully if it is unavailable.
+    if args.device == "cuda" and not torch.cuda.is_available():
+        fallback = "mps" if torch.backends.mps.is_available() else "cpu"
+        print(f"[WARNING] --device cuda requested but CUDA is unavailable; using '{fallback}'.")
+        args.device = fallback
+    elif args.device == "mps" and not torch.backends.mps.is_available():
+        print("[WARNING] --device mps requested but MPS is unavailable; using 'cpu'.")
+        args.device = "cpu"
+    device = torch.device(args.device)
     print(f"Device: {device} | Model: {model_id}")
     
     # 1. DATASET SETUP
