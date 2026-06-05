@@ -117,10 +117,45 @@ def init_cp_from_ff(model, ff_state_dict, window_size, ranks, device):
         
         model.heads['input_units_phi'].weight.copy_(reshaped_emissions)
         nn.init.zeros_(model.heads['input_units_phi'].bias)
-        
+
         # Initialize sum_unit_omega (gate) to zero to ensure uniform weight distribution initially
         nn.init.zeros_(model.heads['sum_unit_omega'].weight)
         nn.init.zeros_(model.heads['sum_unit_omega'].bias)
+
+def init_hmm_from_ff(model, ff_state_dict, window_size, ranks, device):
+    """
+    Initializes the HMM head's emission weights from a trained Feed-Forward (FF) head, so the
+    HMM starts equivalent to FF (slides: "...initialise the emission matrices of the target
+    circuit (CP / HMM)"). The transitions keep their identity init from the circuit constructor
+    and the initial-state gate is set to uniform, so the HMM initially reproduces the FF marginals.
+    """
+    with torch.no_grad():
+        H = model.embed_dim
+        V = model.vocab_size
+        W = window_size
+        R = ranks
+        # HMM input_units_phi.view layout is [window, ranks, vocab] (no permute, unlike CP).
+        new_emissions = torch.zeros(W, R, V, H, device=device, dtype=model.backbone.dtype)
+        for t in range(W):
+            ff_key = f'input_units_phi_{t+1}.weight'
+            old_ff_key = f'emission_{t+1}.weight'
+            if ff_key in ff_state_dict:
+                ff_weight = ff_state_dict[ff_key].to(device=device, dtype=model.backbone.dtype)  # [V, H]
+            elif old_ff_key in ff_state_dict:
+                ff_weight = ff_state_dict[old_ff_key].to(device=device, dtype=model.backbone.dtype)
+            else:
+                print(f"[WARNING] FF key for window position {t+1} not found in FF state_dict.")
+                continue
+            new_emissions[t, :, :, :] = ff_weight.unsqueeze(0).expand(R, V, H)
+
+        reshaped_emissions = new_emissions.reshape(-1, H)
+        reshaped_emissions += torch.randn_like(reshaped_emissions) * 1e-4  # symmetry-breaking
+        model.heads['input_units_phi'].weight.copy_(reshaped_emissions)
+        nn.init.zeros_(model.heads['input_units_phi'].bias)
+
+        # Uniform initial-state distribution (transitions stay identity-initialised from the circuit).
+        nn.init.zeros_(model.heads['sum_unit_omega_init'].weight)
+        nn.init.zeros_(model.heads['sum_unit_omega_init'].bias)
 
 def plot_losses(losses, phase_name, save_path):
     try:
@@ -436,7 +471,8 @@ def main():
         if args.skip_phase_1 == "auto":
             phase1_paths = [
                 os.path.join(save_dir, f"lora_{head_name_str}_w{window_size}", f"mtp_backbone_lora_{head_name_str}_w{window_size}"),
-                os.path.join(save_dir, f"lora_{head_name_str}_w{window_size}_phase1")
+                os.path.join(save_dir, f"lora_{head_name_str}_w{window_size}_phase1"),
+                os.path.join(save_dir, f"lora_ff_w{window_size}_phase1"),  # Phase 1 is always FF; CP/HMM reuse its backbone
             ]
             final_lora_path, _ = get_model_paths_python(head_name_str, window_size, save_dir)
             if final_lora_path and final_lora_path not in phase1_paths:
@@ -458,7 +494,8 @@ def main():
         if skip_phase_1:
             phase1_paths = [
                 os.path.join(save_dir, f"lora_{head_name_str}_w{window_size}", f"mtp_backbone_lora_{head_name_str}_w{window_size}"),
-                os.path.join(save_dir, f"lora_{head_name_str}_w{window_size}_phase1")
+                os.path.join(save_dir, f"lora_{head_name_str}_w{window_size}_phase1"),
+                os.path.join(save_dir, f"lora_ff_w{window_size}_phase1"),  # Phase 1 is always FF; CP/HMM reuse its backbone
             ]
             final_lora_path, _ = get_model_paths_python(head_name_str, window_size, save_dir)
             if final_lora_path and final_lora_path not in phase1_paths:
@@ -795,21 +832,25 @@ def main():
             except Exception as e:
                 print(f"[WARNING] Failed to load pre-trained target head weights: {e}")
                 
-        # If no pre-trained final weights, fallback to Phase 1 FF transfer for CP
-        if not head_loaded and target_head_class.__name__ == 'CanonicPolyidiac':
+        # If no pre-trained final weights, initialise the target circuit from the trained Phase 1
+        # FF emissions (CP and HMM both start equivalent to FF, per the paper/slides).
+        if not head_loaded and target_head_class.__name__ in ('CanonicPolyidiac', 'MTPC_HMM'):
             if not skip_phase_1:
                 ff_head_save_path = os.path.join(save_dir, f"mtp_head_ff_w{window_size}_phase1.pth")
             else:
                 ff_head_save_path = args.head_weights_path if args.head_weights_path else os.path.join(save_dir, f"mtp_head_ff_w{window_size}_phase1.pth")
-                
+
             if os.path.exists(ff_head_save_path):
                 print(f"[SYSTEM] Transferring trained Phase 1 FF weights from {ff_head_save_path} to {target_head_class.__name__}...")
                 try:
                     ff_state_dict = torch.load(ff_head_save_path, map_location=device)
-                    init_cp_from_ff(model, ff_state_dict, window_size, ranks, device)
+                    if target_head_class.__name__ == 'CanonicPolyidiac':
+                        init_cp_from_ff(model, ff_state_dict, window_size, ranks, device)
+                    else:
+                        init_hmm_from_ff(model, ff_state_dict, window_size, ranks, device)
                     head_loaded = True
                 except Exception as e:
-                    print(f"[WARNING] Failed to load FF head weights: {e}")
+                    print(f"[WARNING] Failed to transfer FF head weights: {e}")
                     
         if not head_loaded:
             print(f"[SYSTEM] Initializing {target_head_class.__name__} weights from backbone STP...")
