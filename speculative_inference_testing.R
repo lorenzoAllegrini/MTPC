@@ -108,7 +108,7 @@ get_inference_paths = function(head_type, window_size) {
   # Explicit model paths (window 6 checkpoints). HMM uses its real adapter/head
   # (lora_hmm_w6 + mtp_head_hmm_w6_final), not a .pth as a backbone.
   return(switch(head_type,
-    "ff"  = list(lora_dir = "saved_models/lora_ff_w6_phase1",                   weights_path = "saved_models/mtp_head_ff_w6_phase1.pth"),
+    "ff"  = list(lora_dir = "saved_models/lora_ff_w6/mtp_backbone_lora_ff_w6", weights_path = "saved_models/mtp_head_ff_w6_final.pth"),
     "cp"  = list(lora_dir = "saved_models/lora_cp_w6/mtp_backbone_lora_cp_w6",   weights_path = "saved_models/mtp_head_cp_w6_final.pth"),
     "hmm"   = list(lora_dir = "saved_models/lora_hmm_w6/mtp_backbone_lora_hmm_w6",     weights_path = "saved_models/mtp_head_hmm_w6_final.pth"),
     "btree" = list(lora_dir = "saved_models/lora_btree_w6/mtp_backbone_lora_btree_w6", weights_path = "saved_models/mtp_head_btree_w6_final.pth"),
