@@ -460,11 +460,193 @@ CPCircuit = setRefClass("CPCircuit",
   )
 )
 
+build_btree_topology = function(window_size) {
+  # Balanced binary tree of latents over `window_size` token positions: recursively split a span
+  # at floor(len/2) down to single-token leaves (MTPC-BTree, Fig. 2). 1-based indices.
+  #   node_parent[k]  = parent internal-node index (0 for root)
+  #   token_parent[i] = internal-node index that emits token position i
+  # Internal nodes are numbered pre-order (parent index < child index).
+  node_parent = integer(0)
+  token_parent = integer(window_size)
+  build = function(toks, parent) {
+    node_parent[[length(node_parent) + 1L]] <<- parent
+    idx = length(node_parent)
+    h = length(toks) %/% 2L
+    for (sub in list(toks[seq_len(h)], toks[(h + 1L):length(toks)])) {
+      if (length(sub) == 1L) token_parent[[sub[1]]] <<- idx else build(sub, idx)
+    }
+    idx
+  }
+  if (window_size == 1L) { node_parent = 0L; token_parent = 1L } else build(seq_len(window_size), 0L)
+  list(node_parent = as.integer(node_parent), token_parent = as.integer(token_parent),
+       n_internal = length(node_parent))
+}
+
+BTreeCircuit = setRefClass("BTreeCircuit",
+  contains = "ProbabilisticCircuit",
+  fields = list(node_parent = "ANY", token_parent = "ANY", n_internal = "integer", n_trans = "integer"),
+  methods = list(
+    initialize = function(window_size = 8L, ranks = 32L) {
+      # initializes the binary-tree circuit and its (fixed) tree topology
+      callSuper(window_size = window_size, ranks = ranks)
+      is_log_probs <<- TRUE
+      topo = build_btree_topology(as.integer(window_size))
+      node_parent  <<- topo$node_parent
+      token_parent <<- topo$token_parent
+      n_internal   <<- as.integer(topo$n_internal)
+      n_trans      <<- as.integer(max(0L, topo$n_internal - 1L))
+    },
+
+    inject_head = function(model) {
+      # injects root-prior, tree-transition and per-position emission layers; uniform mixtures at
+      # every sum node (zeroed gates) + emissions copied from the STP lm_head -> BTree == FF at init
+      ed = as.integer(model$embed_dim)
+      vs = as.integer(model$vocab_size)
+      layers = list(
+        sum_unit_omega_init = nn$Linear(ed, ranks),                                        # root prior q(z_root)
+        input_units_phi = nn$Linear(ed, as.integer(window_size * ranks * vs)),              # emissions [window, ranks, vocab]
+        sum_unit_omega_transitions = nn$Linear(ed, as.integer(max(1L, n_trans) * ranks * ranks))  # tree edges q(z_child|z_parent)
+      )
+      model$heads$update(layers)
+
+      # zero gates -> perfectly uniform mixture at every node of the tree
+      nn$init$zeros_(model$heads[["sum_unit_omega_init"]]$weight)
+      nn$init$zeros_(model$heads[["sum_unit_omega_init"]]$bias)
+      nn$init$zeros_(model$heads[["sum_unit_omega_transitions"]]$weight)
+      nn$init$zeros_(model$heads[["sum_unit_omega_transitions"]]$bias)
+
+      with(torch$no_grad(), {
+        if (!is.null(model$backbone$lm_head)) {
+          stp_weight = model$backbone$lm_head$weight$detach()$clone()
+        } else {
+          stp_weight = model$backbone$get_output_embeddings()$weight$detach()$clone()
+        }
+        H = as.integer(stp_weight$shape[1])
+        # [vocab, embed] -> [window, ranks, vocab, embed] (HMM layout) -> [window*ranks*vocab, embed]
+        emission_init = stp_weight$unsqueeze(0L)$unsqueeze(0L)$
+          expand(window_size, ranks, -1L, -1L)$
+          reshape(-1L, H)
+        model$heads[["input_units_phi"]]$weight$copy_(emission_init)
+        nn$init$zeros_(model$heads[["input_units_phi"]]$bias)
+      })
+      invisible(model)
+    },
+
+    forward = function(model, hidden_states) {
+      # per-position log-marginals via the binary tree, shape [batch, seq, window, vocab]
+      batch_size = as.integer(hidden_states$shape[0])
+      seq_len    = as.integer(hidden_states$shape[1])
+      vocab_size = as.integer(model$vocab_size)
+
+      log_init = F_$log_softmax(model$heads[["sum_unit_omega_init"]](hidden_states), dim = -1L)   # [B,S,r]
+      flat_trans = model$heads[["sum_unit_omega_transitions"]](hidden_states)
+      log_trans = F_$log_softmax(
+        flat_trans$narrow(-1L, 0L, as.integer(n_trans * ranks * ranks))$view(batch_size, seq_len, n_trans, ranks, ranks),
+        dim = -1L)                                                                                # [B,S,n_trans,r,r]
+      flat_emiss = model$heads[["input_units_phi"]](hidden_states)
+      log_emiss = F_$log_softmax(flat_emiss$view(batch_size, seq_len, window_size, ranks, vocab_size), dim = -1L)  # [B,S,W,r,V]
+
+      log_p = vector("list", n_internal)
+      log_p[[1]] = log_init
+      if (n_internal >= 2L) for (k in 2:n_internal) {
+        curr_trans = log_trans$select(2L, as.integer(k - 2L))                                     # [B,S,r_parent,r_child]
+        log_p[[k]] = torch$logsumexp(log_p[[node_parent[k]]]$unsqueeze(-1L) + curr_trans, dim = 2L)  # [B,S,r_child]
+      }
+      log_marginal_probs = vector("list", window_size)
+      for (i in seq_len(window_size)) {
+        curr_emiss = log_emiss$select(2L, as.integer(i - 1L))                                     # [B,S,r,V]
+        log_marginal_probs[[i]] = torch$logsumexp(log_p[[token_parent[i]]]$unsqueeze(-1L) + curr_emiss, dim = 2L)  # [B,S,V]
+      }
+      torch$stack(log_marginal_probs, dim = 2L)                                                   # [B,S,W,V]
+    },
+
+    get_draft_probs = function(model, embeddings) {
+      # returns root prior, tree transitions and per-position emissions as probabilities
+      with(torch$no_grad(), {
+        last_emb = embeddings$select(1L, -1L)$unsqueeze(1L)                                        # [B,1,d]
+        batch_size = as.integer(last_emb$shape[0])
+        vocab_size = as.integer(model$vocab_size)
+
+        init_probs = F_$softmax(model$heads[["sum_unit_omega_init"]](last_emb)$squeeze(1L), dim = -1L)  # [B,r]
+        flat_trans = model$heads[["sum_unit_omega_transitions"]](last_emb)
+        trans_probs = F_$softmax(
+          flat_trans$narrow(-1L, 0L, as.integer(n_trans * ranks * ranks))$view(batch_size, n_trans, ranks, ranks),
+          dim = -1L)                                                                              # [B,n_trans,r,r]
+        flat_emiss = model$heads[["input_units_phi"]](last_emb)
+        emiss_probs = F_$softmax(flat_emiss$view(batch_size, window_size, ranks, vocab_size), dim = -1L)  # [B,W,r,V]
+        list(
+          init  = as.array(init_probs$cpu()$numpy()),    # [batch, ranks]
+          trans = as.array(trans_probs$cpu()$numpy()),   # [batch, n_trans, ranks, ranks]
+          emiss = as.array(emiss_probs$cpu()$numpy())    # [batch, window, ranks, vocab]
+        )
+      })
+    },
+
+    get_full_vocab_dist = function(probs, step, batch_idx = 1L) {
+      # per-position marginal q(x_step): propagate latent marginals root->leaf, then emit
+      p = vector("list", n_internal)
+      p[[1]] = probs$init[batch_idx, ]
+      if (n_internal >= 2L) for (k in 2:n_internal) {
+        p[[k]] = as.vector(p[[node_parent[k]]] %*% probs$trans[batch_idx, k - 1L, , ])
+      }
+      v = as.vector(p[[token_parent[step]]] %*% probs$emiss[batch_idx, step, , ])
+      v / sum(v)
+    },
+
+    generate_draft = function(probs, batch_idx = 1L) {
+      # marginal-argmax draft per window position (same convention as CP)
+      sapply(seq_len(window_size), function(t) which.max(.self$get_full_vocab_dist(probs, t, batch_idx)) - 1L)
+    },
+
+    compute_prefix_probs = function(probs, draft_tokens, batch_idx = 1L) {
+      # joint probability of each observed prefix via a bottom-up tree contraction
+      ws = length(draft_tokens)
+      q_values = numeric(ws)
+      for (t in seq_len(ws)) {
+        node_value = vector("list", n_internal)
+        for (k in n_internal:1) {
+          v = rep(1.0, ranks)
+          for (j in which(node_parent == k)) v = v * as.vector(probs$trans[batch_idx, j - 1L, , ] %*% node_value[[j]])
+          for (i in which(token_parent == k)) if (i <= t) v = v * probs$emiss[batch_idx, i, , draft_tokens[i] + 1L]
+          node_value[[k]] = v
+        }
+        q_values[t] = sum(probs$init[batch_idx, ] * node_value[[1]])
+      }
+      q_values
+    },
+
+    get_conditional_dist = function(probs, accepted_prefix, batch_idx = 1L) {
+      # distribution over the next token given the accepted prefix: tree contraction carrying the
+      # vocab dimension along the query token's path (other tokens after the prefix marginalised out)
+      s = length(accepted_prefix)
+      query_pos = s + 1L
+      node_value = vector("list", n_internal)
+      has_vocab = logical(n_internal)
+      for (k in n_internal:1) {
+        v = rep(1.0, ranks); hv = FALSE
+        for (j in which(node_parent == k)) {
+          Tj = probs$trans[batch_idx, j - 1L, , ]
+          if (has_vocab[j]) { v = v * (Tj %*% node_value[[j]]); hv = TRUE } else v = v * as.vector(Tj %*% node_value[[j]])
+        }
+        for (i in which(token_parent == k)) {
+          if (i == query_pos) { v = v * probs$emiss[batch_idx, i, , ]; hv = TRUE }
+          else if (i <= s) v = v * probs$emiss[batch_idx, i, , accepted_prefix[i] + 1L]
+        }
+        node_value[[k]] = v; has_vocab[k] = hv
+      }
+      res = as.vector(probs$init[batch_idx, ] %*% node_value[[1]])
+      denom = sum(res)
+      if (denom > 0) res / denom else res
+    }
+  )
+)
+
 create_circuit = function(type, window_size = 8L, ranks = 32L) {
   switch(tolower(type),
-    "hmm" = HMMCircuit$new(window_size = window_size, ranks = ranks),
-    "ff"  = FFCircuit$new(window_size = window_size, ranks = ranks),
-    "cp"  = CPCircuit$new(window_size = window_size, ranks = ranks),
-    stop(sprintf("Tipo di circuito sconosciuto: '%s'. Usa 'hmm', 'ff', o 'cp'.", type))
+    "hmm"   = HMMCircuit$new(window_size = window_size, ranks = ranks),
+    "ff"    = FFCircuit$new(window_size = window_size, ranks = ranks),
+    "cp"    = CPCircuit$new(window_size = window_size, ranks = ranks),
+    "btree" = BTreeCircuit$new(window_size = window_size, ranks = ranks),
+    stop(sprintf("Tipo di circuito sconosciuto: '%s'. Usa 'hmm', 'ff', 'cp' o 'btree'.", type))
   )
 }

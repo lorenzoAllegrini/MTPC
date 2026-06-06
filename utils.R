@@ -86,6 +86,7 @@ init_probabilistic_circuit = function(head_type, window_size, ranks) {
     "ff" = FFCircuit$new(window_size = window_size, ranks = ranks),
     "hmm" = HMMCircuit$new(window_size = window_size, ranks = ranks),
     "cp" = CPCircuit$new(window_size = window_size, ranks = ranks),
+    "btree" = BTreeCircuit$new(window_size = window_size, ranks = ranks),
     stop(sprintf("Tipo di testa non supportato: %s", head_type))
   )
 }

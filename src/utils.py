@@ -53,7 +53,8 @@ class MTPChatDataset(Dataset):
         }
 
 def compute_mtpc_loss(mtp_logits, labels, window_size, gamma=0.8, ignore_index=-100, is_log_probs=False):
-    combined_loss = 0.0
+    # graph-connected zero base so .backward() works even if every step is skipped (NaN-guard below)
+    combined_loss = mtp_logits.sum() * 0.0
     seq_len = mtp_logits.shape[1]
     for j in range(1, window_size + 1):
         # Paper-aligned: step j (head j-1) predicts the token (j-1) positions ahead of the
@@ -77,8 +78,11 @@ def compute_mtpc_loss(mtp_logits, labels, window_size, gamma=0.8, ignore_index=-
                 ignore_index=ignore_index
             )
         
-        combined_loss += (gamma ** (j - 1)) * step_loss
-        
+        # skip non-finite step losses (e.g. a batch/step with no valid target tokens -> nll over
+        # zero elements = NaN) so they don't poison the gradient (mirrors the R compute_mtpc_loss)
+        if torch.isfinite(step_loss):
+            combined_loss = combined_loss + (gamma ** (j - 1)) * step_loss
+
     return combined_loss
 
 def evabyte_encode(text, max_length):

@@ -6,7 +6,7 @@ source("mtpc/speculative_decoding.R")
 
 # target models and architectures
 MODEL_ID = "google/byt5-small"
-PROBABILISTIC_HEADS = c("ff", "cp", "hmm")
+PROBABILISTIC_HEADS = c("hmm", "ff", "cp", "btree")
 WINDOW_SIZE = 6L
 RANKS = 32L
 MAX_LEN = 2048L
@@ -16,7 +16,7 @@ CHEAT = FALSE # Keep FALSE: cheat feeds the full answer into byT5's bidirectiona
               # inference (the answer isn't in the encoder yet). Train and infer without cheat.
 
 
-N_SAMPLES = 3L
+N_SAMPLES = 100L
 
 CHAT_TEMPLATE = "{% for message in messages %}{% if message['role'] == 'user' %}{{ '<|user|>\\n' + message['content'] + '\\n' }}{% elif message['role'] == 'assistant' %}{{ '<|assistant|>\\n' + message['content'] + '<|end|>\\n' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>\\n' }}{% endif %}"
 
@@ -110,7 +110,8 @@ get_inference_paths = function(head_type, window_size) {
   return(switch(head_type,
     "ff"  = list(lora_dir = "saved_models/lora_ff_w6_phase1",                   weights_path = "saved_models/mtp_head_ff_w6_phase1.pth"),
     "cp"  = list(lora_dir = "saved_models/lora_cp_w6/mtp_backbone_lora_cp_w6",   weights_path = "saved_models/mtp_head_cp_w6_final.pth"),
-    "hmm" = list(lora_dir = "saved_models/lora_hmm_w6/mtp_backbone_lora_hmm_w6", weights_path = "saved_models/mtp_head_hmm_w6_final.pth"),
+    "hmm"   = list(lora_dir = "saved_models/lora_hmm_w6/mtp_backbone_lora_hmm_w6",     weights_path = "saved_models/mtp_head_hmm_w6_final.pth"),
+    "btree" = list(lora_dir = "saved_models/lora_btree_w6/mtp_backbone_lora_btree_w6", weights_path = "saved_models/mtp_head_btree_w6_final.pth"),
     stop(sprintf("Unknown head_type: %s", head_type))
   ))
 

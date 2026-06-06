@@ -242,5 +242,133 @@ class MTPC_HMM(nn.Module):
             if t < self.window_size - 1:
                 curr_trans = trans_probs[batch_indices, t, z_t, :]
                 z_t = Categorical(probs=curr_trans.to("cpu")).sample().to(embeddings.device)
-                
+
         return torch.stack(draft_tokens, dim=1) # [B, W]
+
+
+def build_btree_topology(window_size):
+    """
+    Builds the balanced binary-tree topology of latents over `window_size` token positions,
+    recursively splitting a span at floor(len/2) down to the base case n=1 (a leaf token), as in
+    MTPC-BTree (Fig. 2 of the paper). Returns:
+      node_parent  : list[int]  -> for each internal (sum) node, the index of its parent node (-1 for root)
+      token_parent : list[int]  -> for each token position, the index of the internal node that emits it
+      n_internal   : int        -> number of internal latent/sum nodes (= window_size - 1 for window_size>=2)
+    Internal nodes are numbered in pre-order (parent index < child index), so a single forward
+    pass over nodes 0..n_internal-1 always processes a parent before its children.
+    Non-root node k owns transition matrix index (k-1) -> q(z_k | z_{parent(k)}).
+    """
+    node_parent = []
+    token_parent = [None] * window_size
+
+    def build(toks, parent):
+        idx = len(node_parent)
+        node_parent.append(parent)
+        h = len(toks) // 2
+        for sub in (toks[:h], toks[h:]):
+            if len(sub) == 1:
+                token_parent[sub[0]] = idx          # leaf token emitted from this node's latent
+            else:
+                build(sub, idx)                     # internal child node
+        return idx
+
+    if window_size == 1:
+        # degenerate: single token, single latent emitting it
+        node_parent = [-1]
+        token_parent = [0]
+    else:
+        build(list(range(window_size)), -1)
+    return node_parent, token_parent, len(node_parent)
+
+
+class BTree(nn.Module):
+    """
+    Binary-tree probabilistic circuit (MTPC-BTree): a hierarchy of latent variables over the MTP
+    window. Mirrors MTPC_HMM's parameterisation (root prior + transitions + per-position emissions)
+    but wires the latents as a balanced binary tree instead of a chain, so latents and tokens can be
+    sampled with log(n) depth. The per-position marginal q(x_{t+i} | x<=t) is obtained by propagating
+    the latent marginals from the root down to token i's parent latent (other branches marginalise to 1).
+    """
+    def __init__(self, embedding_size, vocabulary_size, window_size=8, ranks=32):
+        super().__init__()
+        self.window_size = window_size
+        self.ranks = ranks
+        self.vocabulary_size = vocabulary_size
+        self.is_log_probs = True
+
+        self.node_parent, self.token_parent, self.n_internal = build_btree_topology(window_size)
+        self.n_trans = max(0, self.n_internal - 1)   # non-root internal nodes own one transition each
+
+        # sum_unit_omega_init: root prior q(z_root); sum_unit_omega_transitions: tree edges q(z_child|z_parent);
+        # input_units_phi: per-position emissions q(x_i | z_{parent(i)}) -> view [window, ranks, vocab] (HMM layout)
+        self.sum_unit_omega_init = nn.Linear(embedding_size, ranks)
+        self.sum_unit_omega_transitions = nn.Linear(embedding_size, max(1, self.n_trans) * ranks * ranks)
+        self.input_units_phi = nn.Linear(embedding_size, window_size * ranks * vocabulary_size)
+
+        # --- INITIALIZATION --- uniform mixtures at every sum node (gate weights = 0) so the tree
+        # reduces to the FF marginal at init (see init_btree_from_ff for the emission transfer).
+        with torch.no_grad():
+            nn.init.zeros_(self.sum_unit_omega_init.weight)
+            nn.init.zeros_(self.sum_unit_omega_init.bias)
+            nn.init.zeros_(self.sum_unit_omega_transitions.weight)
+            nn.init.zeros_(self.sum_unit_omega_transitions.bias)
+
+    def _latent_log_marginals(self, log_init, log_trans):
+        # log_init: [B,S,r]; log_trans: [B,S,n_trans,r_parent,r_child] (or None). Returns list of [B,S,r].
+        log_p = [None] * self.n_internal
+        log_p[0] = log_init
+        for k in range(1, self.n_internal):
+            parent = self.node_parent[k]
+            # q(z_k) = sum_{z_parent} q(z_parent) q(z_k | z_parent)
+            log_p[k] = stable_logsumexp(log_p[parent].unsqueeze(-1) + log_trans[:, :, k - 1, :, :], dim=-2)
+        return log_p
+
+    def forward(self, embeddings):
+        batch_size, seq_len, _ = embeddings.shape
+        log_init = F.log_softmax(self.sum_unit_omega_init(embeddings), dim=-1)  # [B,S,r]
+        log_trans = None
+        if self.n_trans > 0:
+            flat_trans = self.sum_unit_omega_transitions(embeddings)
+            log_trans = F.log_softmax(
+                flat_trans[..., :self.n_trans * self.ranks * self.ranks].view(
+                    batch_size, seq_len, self.n_trans, self.ranks, self.ranks), dim=-1)
+        log_emiss = F.log_softmax(self.input_units_phi(embeddings).view(
+            batch_size, seq_len, self.window_size, self.ranks, self.vocabulary_size), dim=-1)  # [B,S,W,r,V]
+
+        log_p = self._latent_log_marginals(log_init, log_trans)
+        log_marginal_probs = []
+        for i in range(self.window_size):
+            pl = self.token_parent[i]
+            # q(x_i) = sum_z q(z_parent(i)=z) q(x_i | z)
+            log_marginal_probs.append(
+                stable_logsumexp(log_p[pl].unsqueeze(-1) + log_emiss[:, :, i, :, :], dim=-2))  # [B,S,V]
+        return torch.stack(log_marginal_probs, dim=2)  # [B,S,W,V]
+
+    @torch.no_grad()
+    def generate_draft(self, embeddings):
+        last_emb = embeddings[:, -1:, :]
+        batch_size = last_emb.shape[0]
+        bidx = torch.arange(batch_size, device=embeddings.device)
+
+        init_probs = F.softmax(self.sum_unit_omega_init(last_emb).squeeze(1), dim=-1)  # [B,r]
+        trans_probs = None
+        if self.n_trans > 0:
+            trans_probs = F.softmax(self.sum_unit_omega_transitions(last_emb).view(
+                batch_size, self.n_trans, self.ranks, self.ranks), dim=-1)  # [B,n_trans,r,r]
+        emiss_probs = F.softmax(self.input_units_phi(last_emb).view(
+            batch_size, self.window_size, self.ranks, self.vocabulary_size), dim=-1)  # [B,W,r,V]
+
+        # ancestral sampling of the latent tree (CPU fallback for MPS Categorical bug)
+        z = [None] * self.n_internal
+        z[0] = Categorical(probs=init_probs.to("cpu")).sample().to(embeddings.device)
+        for k in range(1, self.n_internal):
+            parent = self.node_parent[k]
+            curr = trans_probs[bidx, k - 1, z[parent], :]  # [B,r]
+            z[k] = Categorical(probs=curr.to("cpu")).sample().to(embeddings.device)
+
+        draft_tokens = []
+        for i in range(self.window_size):
+            pl = self.token_parent[i]
+            curr_emiss = emiss_probs[bidx, i, z[pl], :]  # [B,V]
+            draft_tokens.append(Categorical(probs=curr_emiss.to("cpu")).sample().to(embeddings.device))
+        return torch.stack(draft_tokens, dim=1)  # [B,W]

@@ -65,7 +65,7 @@ class MTP_LLM(nn.Module):
         )
         
         # Extract named layers into nn.ModuleDict (matching R's LLMWrapper)
-        if head_class.__name__ == 'MTPC_HMM':
+        if head_class.__name__ in ('MTPC_HMM', 'BTree'):
             layers = {
                 "sum_unit_omega_init": circuit.sum_unit_omega_init,
                 "input_units_phi": circuit.input_units_phi,

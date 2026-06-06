@@ -5,7 +5,7 @@ import torch
 from transformers import AutoTokenizer, AutoConfig
 from torch.utils.data import DataLoader
 
-from models.probabilistic_circuits import FF, CanonicPolyidiac, MTPC_HMM
+from models.probabilistic_circuits import FF, CanonicPolyidiac, MTPC_HMM, BTree
 from models.mtp_llm import MTP_LLM
 from utils import MTPChatDataset, get_byt5_preprocess_function, load_tulu_dataset, CHAT_TEMPLATE, get_model_paths_python
 
@@ -15,7 +15,7 @@ if __name__ == "__main__":
     import os
     
     parser = argparse.ArgumentParser(description="MTP Speculative Decoding Qualitative Inference")
-    parser.add_argument("--head", type=str, choices=["cp", "hmm", "ff"], default="cp", help="Target head class (cp, hmm, ff)")
+    parser.add_argument("--head", type=str, choices=["cp", "hmm", "ff", "btree"], default="cp", help="Target head class (cp, hmm, ff, btree)")
     parser.add_argument("--window_size", type=int, default=4, help="Speculative window size")
     parser.add_argument("--model_id", type=str, default="google/byt5-small", help="Pretrained model ID")
     parser.add_argument("--num_samples", type=int, default=100, help="Number of validation samples to test")
@@ -36,7 +36,9 @@ if __name__ == "__main__":
         HEAD_CLASS = MTPC_HMM
     elif args.head == "ff":
         HEAD_CLASS = FF
-        
+    elif args.head == "btree":
+        HEAD_CLASS = BTree
+
     save_dir = "saved_models"
     LORA_PATH, WEIGHTS_PATH = get_model_paths_python(args.head, args.window_size, save_dir)
             
@@ -153,7 +155,7 @@ if __name__ == "__main__":
             # True next tokens (ground truth for window): step 1 predicts labels[test_idx]
             true_ids = labels[0, test_idx : test_idx + WINDOW_SIZE]
             
-            if head_name in ['CanonicPolyidiac', 'MTPC_HMM']:
+            if head_name in ['CanonicPolyidiac', 'MTPC_HMM', 'BTree']:
                 # These expect hidden states [1, 1, D]
                 test_emb = hidden_states[:, test_idx:test_idx+1, :]
                 predicted_ids = model._circuit.generate_draft(test_emb)[0]

@@ -11,8 +11,8 @@ from torch.optim import Adam
 from tqdm import tqdm
 from contextlib import nullcontext
 
-from models.probabilistic_circuits import FF, CanonicPolyidiac, MTPC_HMM
-from models.mtp_llm import MTP_LLM 
+from models.probabilistic_circuits import FF, CanonicPolyidiac, MTPC_HMM, BTree
+from models.mtp_llm import MTP_LLM
 from utils import MTPChatDataset, compute_mtpc_loss, get_byt5_preprocess_function, load_tulu_dataset, CHAT_TEMPLATE, get_model_paths_python
 
 def swap_model_head(model, head_class, window_size, ranks, device):
@@ -26,7 +26,7 @@ def swap_model_head(model, head_class, window_size, ranks, device):
         **({'ranks': ranks} if 'ranks' in head_class.__init__.__code__.co_varnames else {})
     )
     
-    if head_class.__name__ == 'MTPC_HMM':
+    if head_class.__name__ in ('MTPC_HMM', 'BTree'):
         layers = {
             "sum_unit_omega_init": circuit.sum_unit_omega_init,
             "input_units_phi": circuit.input_units_phi,
@@ -60,7 +60,8 @@ def init_emissions_from_stp(model, window_size, ranks):
         V, H = stp_weight.shape
         head_name = model._head_class_name
 
-        if head_name == 'MTPC_HMM':
+        if head_name in ('MTPC_HMM', 'BTree'):
+            # BTree shares the HMM emission layout [window, ranks, vocab]
             emission_init = (stp_weight
                 .unsqueeze(0).unsqueeze(0)
                 .expand(window_size, ranks, -1, -1)
@@ -156,6 +157,42 @@ def init_hmm_from_ff(model, ff_state_dict, window_size, ranks, device):
         # Uniform initial-state distribution (transitions stay identity-initialised from the circuit).
         nn.init.zeros_(model.heads['sum_unit_omega_init'].weight)
         nn.init.zeros_(model.heads['sum_unit_omega_init'].bias)
+
+def init_btree_from_ff(model, ff_state_dict, window_size, ranks, device):
+    """
+    Initializes the BTree head from a trained Feed-Forward (FF) head so the tree reduces to FF at
+    init (the user's plan): copy each window-position's FF emission into every rank (HMM layout
+    [window, ranks, vocab]) with tiny symmetry-breaking noise, and set ALL hierarchical sum gates
+    (root prior + tree transitions) to zero -> a perfectly uniform mixture at every node of the tree.
+    """
+    with torch.no_grad():
+        H = model.embed_dim
+        V = model.vocab_size
+        W = window_size
+        R = ranks
+        new_emissions = torch.zeros(W, R, V, H, device=device, dtype=model.backbone.dtype)
+        for t in range(W):
+            ff_key = f'input_units_phi_{t+1}.weight'
+            old_ff_key = f'emission_{t+1}.weight'
+            if ff_key in ff_state_dict:
+                ff_weight = ff_state_dict[ff_key].to(device=device, dtype=model.backbone.dtype)  # [V, H]
+            elif old_ff_key in ff_state_dict:
+                ff_weight = ff_state_dict[old_ff_key].to(device=device, dtype=model.backbone.dtype)
+            else:
+                print(f"[WARNING] FF key for window position {t+1} not found in FF state_dict.")
+                continue
+            new_emissions[t, :, :, :] = ff_weight.unsqueeze(0).expand(R, V, H)
+
+        reshaped_emissions = new_emissions.reshape(-1, H)
+        reshaped_emissions += torch.randn_like(reshaped_emissions) * 1e-4  # break rank symmetry
+        model.heads['input_units_phi'].weight.copy_(reshaped_emissions)
+        nn.init.zeros_(model.heads['input_units_phi'].bias)
+
+        # Uniform mixture at every sum node (root prior + all tree transitions -> 0 logits).
+        nn.init.zeros_(model.heads['sum_unit_omega_init'].weight)
+        nn.init.zeros_(model.heads['sum_unit_omega_init'].bias)
+        nn.init.zeros_(model.heads['sum_unit_omega_transitions'].weight)
+        nn.init.zeros_(model.heads['sum_unit_omega_transitions'].bias)
 
 def plot_losses(losses, phase_name, save_path):
     try:
@@ -335,7 +372,7 @@ def main():
     parser.add_argument("--window_size", type=int, default=4, help="Speculative window size")
     parser.add_argument("--ranks", type=int, default=32, help="Ranks for probabilistic circuit")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
-    parser.add_argument("--head", type=str, choices=["cp", "hmm", "ff"], default="cp", help="Target head class (cp = CanonicPolyidiac, hmm = MTPC_HMM, ff = FF)")
+    parser.add_argument("--head", type=str, choices=["cp", "hmm", "ff", "btree"], default="cp", help="Target head class (cp = CanonicPolyidiac, hmm = MTPC_HMM, ff = FF, btree = BTree)")
     parser.add_argument("--skip_phase_0", type=str, default="true", choices=["true", "false", "auto"], help="Skip Phase 0 autoregressive backbone fine-tuning. 'auto' skips if checkpoint exists.")
     parser.add_argument("--skip_phase_1", type=str, default="false", choices=["true", "false", "auto"], help="Skip Phase 1 FF warm-up. 'auto' skips if checkpoint exists.")
     parser.add_argument("--skip_phase_2", type=str, default="false", choices=["true", "false", "auto"], help="Skip Phase 2 joint training. 'auto' skips if checkpoint exists.")
@@ -348,6 +385,8 @@ def main():
     parser.add_argument("--amp", action="store_true", help="Enable bf16 mixed-precision autocast (recommended on A100/Ampere+ GPUs).")
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader workers (raise to keep the GPU fed; 0 = main thread).")
     parser.add_argument("--save_dir", type=str, default=None, help="Directory for checkpoints + tokenized cache (default: <repo>/saved_models). Set to a Google Drive path to persist models.")
+    parser.add_argument("--head_lr", type=float, default=3e-4, help="Phase-2 learning rate for the speculative head (raise for a quick loss-drop sanity test).")
+    parser.add_argument("--warmup_steps", type=int, default=400, help="Phase-2 linear warmup steps for the backbone LoRA (lower for short runs).")
     args = parser.parse_args()
     args.use_pretrain = (args.use_pretrain == "true")
 
@@ -384,6 +423,8 @@ def main():
         target_head_class = MTPC_HMM
     elif args.head == "ff":
         target_head_class = FF
+    elif args.head == "btree":
+        target_head_class = BTree
 
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     # Where to read/write checkpoints (and the tokenized cache). Default: <repo>/saved_models.
@@ -433,7 +474,7 @@ def main():
     )
     
     # Toggle to skip Phase 2 (Joint training), Phase 0 (Backbone SFT) and/or Phase 1 (FF Warm-up) and load existing weights
-    head_name_str = "cp" if args.head == "cp" else ("hmm" if args.head == "hmm" else "ff")
+    head_name_str = args.head  # cp | hmm | ff | btree  (no longer collapse non-cp/hmm to "ff")
     phase2_lora_path, phase2_head_path = get_model_paths_python(head_name_str, window_size, save_dir)
 
     if args.skip_phase_2 == "auto":
@@ -834,7 +875,7 @@ def main():
                 
         # If no pre-trained final weights, initialise the target circuit from the trained Phase 1
         # FF emissions (CP and HMM both start equivalent to FF, per the paper/slides).
-        if not head_loaded and target_head_class.__name__ in ('CanonicPolyidiac', 'MTPC_HMM'):
+        if not head_loaded and target_head_class.__name__ in ('CanonicPolyidiac', 'MTPC_HMM', 'BTree'):
             if not skip_phase_1:
                 ff_head_save_path = os.path.join(save_dir, f"mtp_head_ff_w{window_size}_phase1.pth")
             else:
@@ -846,6 +887,8 @@ def main():
                     ff_state_dict = torch.load(ff_head_save_path, map_location=device)
                     if target_head_class.__name__ == 'CanonicPolyidiac':
                         init_cp_from_ff(model, ff_state_dict, window_size, ranks, device)
+                    elif target_head_class.__name__ == 'BTree':
+                        init_btree_from_ff(model, ff_state_dict, window_size, ranks, device)
                     else:
                         init_hmm_from_ff(model, ff_state_dict, window_size, ranks, device)
                     head_loaded = True
@@ -859,18 +902,18 @@ def main():
         model.backbone.train()
         model.heads.train()
         
-        is_log_probs = target_head_class.__name__ in ['CanonicPolyidiac', 'MTPC_HMM']
+        is_log_probs = target_head_class.__name__ in ['CanonicPolyidiac', 'MTPC_HMM', 'BTree']
         
-        # Differential learning rates for joint fine-tuning
+        # Differential learning rates for joint fine-tuning (head_lr / warmup_steps overridable via CLI)
         param_groups = [
-            {"params": list(model.heads.parameters()), "lr": 3e-4},
+            {"params": list(model.heads.parameters()), "lr": args.head_lr},
             {"params": [p for p in model.backbone.parameters() if p.requires_grad], "lr": 2e-5}
         ]
         optimizer = Adam(param_groups)
-        
+
         pbar = tqdm(train_loader, desc="Phase 2")
         phase2_losses = []
-        warmup_steps = 400
+        warmup_steps = args.warmup_steps
         start_lora_lr = 1e-6
         target_lora_lr = 1e-4
         optimizer.zero_grad()
@@ -972,7 +1015,7 @@ def main():
                 true_ids = labels[b, test_idx : test_idx + window_size]
                 
                 # Get logits/log_probs at test_idx
-                is_log_probs = head_type in ['CanonicPolyidiac', 'MTPC_HMM']
+                is_log_probs = head_type in ['CanonicPolyidiac', 'MTPC_HMM', 'BTree']
                 sample_logits = mtp_logits[b, test_idx] # [W, V]
                 
                 if is_log_probs:
@@ -982,7 +1025,7 @@ def main():
                     sample_log_probs = F.log_softmax(sample_logits, dim=-1)
                 
                 # Predict speculative window of tokens
-                if head_type in ['CanonicPolyidiac', 'MTPC_HMM']:
+                if head_type in ['CanonicPolyidiac', 'MTPC_HMM', 'BTree']:
                     # Use THIS example's hidden state (b), not the whole batch then [0] — otherwise
                     # the sampled draft comes from batch item 0 while the printed marginal is item b,
                     # making the sampled tokens look like ~0-probability garbage.
