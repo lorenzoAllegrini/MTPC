@@ -6,7 +6,7 @@ source("mtpc/speculative_decoding.R")
 
 # target models and architectures
 MODEL_ID = "google/byt5-small"
-PROBABILISTIC_HEADS = c("cp") 
+PROBABILISTIC_HEADS = c("ff", "cp", "hmm")
 WINDOW_SIZE = 6L
 RANKS = 32L
 MAX_LEN = 2048L
@@ -97,7 +97,7 @@ if (!exists("dataset")) {
 torch_py = import("torch")
 
 # verifier model initialization
-VERIFIER_LORA_DIR = "saved_models/byt5_standard_lora_phase0_v1"
+VERIFIER_LORA_DIR = "saved_models/byt5_standard_lora_phase0"
 verifier_model = LLMWrapper(model_id = MODEL_ID, lora_path = VERIFIER_LORA_DIR, cheat = CHEAT)
 verifier_model$to(device)
 verifier_model$eval()
@@ -105,6 +105,16 @@ verifier_model$eval()
 # accumulates per-head experiment results keyed by head_type
 all_results = list()
 get_inference_paths = function(head_type, window_size) {
+  # Explicit model paths (window 6 checkpoints). HMM uses its real adapter/head
+  # (lora_hmm_w6 + mtp_head_hmm_w6_final), not a .pth as a backbone.
+  return(switch(head_type,
+    "ff"  = list(lora_dir = "saved_models/lora_ff_w6_phase1",                   weights_path = "saved_models/mtp_head_ff_w6_phase1.pth"),
+    "cp"  = list(lora_dir = "saved_models/lora_cp_w6/mtp_backbone_lora_cp_w6",   weights_path = "saved_models/mtp_head_cp_w6_final.pth"),
+    "hmm" = list(lora_dir = "saved_models/lora_hmm_w6/mtp_backbone_lora_hmm_w6", weights_path = "saved_models/mtp_head_hmm_w6_final.pth"),
+    stop(sprintf("Unknown head_type: %s", head_type))
+  ))
+
+  # ----- legacy auto-resolution (unreachable, kept for reference) -----
   # 1. Check if v1 reference models exist in saved_models
   v1_lora = sprintf("saved_models/lora_%s_w%d_phase1_v1", head_type, window_size)
   v1_weights = sprintf("saved_models/mtp_head_%s_w%d_phase1_v1.pth", head_type, window_size)
