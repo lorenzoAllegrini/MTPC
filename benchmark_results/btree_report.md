@@ -96,8 +96,16 @@ The retrained BTree circuit is a strong draft model: **27.6 % global acceptance 
 ```bash
 # 1. benchmark the new btree on the same 50 prompts and merge into the rds
 BT_N=50 Rscript scratch/btree_benchmark.R
-# 2. produce this comparative analysis
+# 2. produce this comparative analysis (text report + plots)
 Rscript inference_analisys.R
+# 3. render the standalone plots (mean acceptance rate, tokens/round)
+Rscript scratch/make_plots.R
 ```
 
-Artefacts: `benchmark_results/results_benchmark_w6.rds` (raw), `benchmark_results/btree_benchmark_plots.pdf` (boxplot + per-head densities).
+**Plots** (metric = mean acceptance rate in *tokens accepted per round, out of 6* — not percentage):
+- `benchmark_results/plot_global_tokens.png` — global mean acceptance rate per circuit (bar chart, e.g. BTree = 1.66 / 6).
+- `benchmark_results/plot_boxplot_tokens.png` — per-prompt mean acceptance rate, by circuit.
+- `benchmark_results/plot_densities_tokens.png` — per-circuit density of the mean acceptance rate.
+- `benchmark_results/btree_benchmark_plots.pdf` — same boxplot + densities (from `inference_analisys.R`).
+
+Raw data: `benchmark_results/results_benchmark_w6.rds`.

@@ -102,21 +102,24 @@ for (h in colnames(spec_metrics)) {
 }
 cat("------------------------------------------------------------------------\n\n")
 
-# plotting: comparative boxplot & densities
-# comparative boxplot of acceptance rates (multiplied by 100 for percentage scale)
-boxplot(perf_matrix * 100, 
-        main = "Speculative Decoding Acceptance Rates by Model", 
-        ylab = "Acceptance Rate (%)", 
-        col = c("#5DA5DA", "#FAA43A", "#60BD68", "#F17CB0")[1:ncol(perf_matrix)], 
+# plotting uses the mean acceptance rate (tokens accepted per round, out of window_size)
+perf_tokens = perf_matrix * window_size
+axis_lab = sprintf("Mean acceptance rate (tokens/round, out of %d)", window_size)
+
+boxplot(perf_tokens,
+        main = "Speculative Decoding Mean Acceptance Rate by Model",
+        ylab = axis_lab,
+        ylim = c(0, window_size),
+        col = c("#5DA5DA", "#FAA43A", "#60BD68", "#F17CB0")[1:ncol(perf_tokens)],
         las = 1)
 
 # density plots layout for individual distributions
 par(mfrow = c(2, 2))
-for (h in colnames(perf_matrix)) {
-  plot(density(perf_matrix[, h] * 100, na.rm = TRUE), 
-       main = sprintf("Density: %s", toupper(h)), 
-       xlab = "Acceptance Rate (%)", 
-       col = "darkblue", 
+for (h in colnames(perf_tokens)) {
+  plot(density(perf_tokens[, h], na.rm = TRUE),
+       main = sprintf("Density: %s", toupper(h)),
+       xlab = axis_lab,
+       col = "darkblue",
        lwd = 2)
 }
 par(mfrow = c(1, 1)) # reset plot layout
