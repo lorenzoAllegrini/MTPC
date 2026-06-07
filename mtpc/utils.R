@@ -34,8 +34,7 @@ create_batches = function(processed, batch_size, shuffle = TRUE) {
 compute_mtpc_loss = function(mtp_logits, labels, window_size, gamma = 0.8, is_log_probs = FALSE) {
   # computes the multi-token prediction loss weighted by an exponential decay factor
   
-  # mtp_logits shape: [batch_size, seq_len, window_size, vocab_size]
-  # labels shape: [batch_size, seq_len]
+  # mtp_logits shape [batch_size, seq_len, window_size, vocab_size]; labels shape [batch_size, seq_len]
   vocab_size = as.integer(mtp_logits$shape[as.integer(mtp_logits$dim() - 1L)])
   losses = lapply(seq_len(window_size), function(j) {
     # roll targets to align with future tokens, shape: [batch_size, seq_len]
@@ -56,7 +55,6 @@ save_model = function(model, head_type_name, window_size, save_dir = "saved_mode
   dir.create(save_dir, showWarnings = FALSE, recursive = TRUE)
   save_path = file.path(save_dir, filename)
   model$save_weights(save_path)
-  cat(sprintf("Model heads saved to %s\n", save_path))
 }
 
 load_model_weights = function(model, weights_path, device) {

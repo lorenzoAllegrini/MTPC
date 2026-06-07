@@ -48,22 +48,22 @@ HMMCircuit = setRefClass("HMMCircuit",
     },
     inject_head = function(model) {
       # injects and initializes inhomogeneous hmm head layers (init, emissions, transitions) into the model
-      
+
       ed = as.integer(model$embed_dim)
       vs = as.integer(model$vocab_size)
       layers = list(
-        sum_unit_omega_init = nn$Linear(ed, ranks), #initial distribution probability of latent states
+        sum_unit_omega_init = nn$Linear(ed, ranks), # initial distribution probability of latent states
         input_units_phi = nn$Linear(ed, as.integer(window_size * ranks * vs)),
-        sum_unit_omega_transitions = nn$Linear(ed, as.integer((window_size - 1L) * ranks * ranks)) #inhomogeneous hmm!
+        sum_unit_omega_transitions = nn$Linear(ed, as.integer((window_size - 1L) * ranks * ranks)) # inhomogeneous hmm!
       )
-      #call to ModuleDict
+      # call to ModuleDict
       model$heads$update(layers)
 
       # state gates initialized to zero, will be changed in a few lines
       nn$init$zeros_(model$heads[["sum_unit_omega_init"]]$weight)
       nn$init$zeros_(model$heads[["sum_unit_omega_init"]]$bias)
 
-      #transition matrix are initialized as Identity with a bit of gaussian noise
+      # transition matrix are initialized as Identity with a bit of gaussian noise
       nn$init$normal_(model$heads[["sum_unit_omega_transitions"]]$weight, mean = 0.0, std = 1e-4)
       # bias_tensor shape: [window_size - 1, ranks, ranks]
       bias_tensor = torch$zeros(window_size - 1L, ranks, ranks)
@@ -71,9 +71,9 @@ HMMCircuit = setRefClass("HMMCircuit",
       bias_tensor$diagonal(dim1 = -2L, dim2 = -1L)$fill_(5.0)
 
       with(torch$no_grad(), {
-        #insert bias vector
+        # insert bias vector
         model$heads[["sum_unit_omega_transitions"]]$bias$copy_(bias_tensor$flatten())
-        
+
         # retrieve stp weights
         if (!is.null(model$backbone$lm_head)) {
           stp_weight = model$backbone$lm_head$weight$detach()$clone()
@@ -85,7 +85,7 @@ HMMCircuit = setRefClass("HMMCircuit",
         H = as.integer(stp_weight$shape[1])
 
         # emission_init shape: [window_size * ranks * vocab_size, embed_dim]
-        emission_init = stp_weight$unsqueeze(0L)$unsqueeze(0L)$ #[vocab_size, embed_dim] -> [1, 1, vocab_size, embed_dim]
+        emission_init = stp_weight$unsqueeze(0L)$unsqueeze(0L)$ # [vocab_size, embed_dim] -> [1, 1, vocab_size, embed_dim]
           expand(window_size, ranks, -1L, -1L)$ # clones into the dimensions with value 1, shape: [window_size, ranks, vocab_size, embed_dim]
           reshape(-1L, H)
         model$heads[["input_units_phi"]]$weight$copy_(emission_init)
@@ -95,12 +95,12 @@ HMMCircuit = setRefClass("HMMCircuit",
     },
     forward = function(model, hidden_states) {
       # computes inhomogeneous hmm log marginal probabilities for speculative decoding
-      
+
       # hidden_states shape: [batch_size, seq_len, embed_dim]
       batch_size = as.integer(hidden_states$shape[0])
       seq_len    = as.integer(hidden_states$shape[1])
       vocab_size = as.integer(model$vocab_size)
-      
+
       # log_alpha shape: [batch_size, seq_len, ranks]
       log_alpha = F_$log_softmax(model$heads[["sum_unit_omega_init"]](hidden_states), dim = -1L)
       flat_emiss = model$heads[["input_units_phi"]](hidden_states)
@@ -132,7 +132,7 @@ HMMCircuit = setRefClass("HMMCircuit",
     },
     get_draft_probs = function(model, embeddings) {
       # retrieves and formats draft transition, emission, and initial probabilities
-      
+
       with(torch$no_grad(), {
         ndims = length(embeddings$shape)
         if (ndims == 3) {
@@ -255,7 +255,7 @@ FFCircuit = setRefClass("FFCircuit",
     },
     forward = function(model, hidden_states) {
       # computes independent logits for each future step and stacks them
-      
+
       # hidden_states shape: [batch_size, seq_len, embed_dim] or [batch_size, embed_dim]
       if (length(hidden_states$size()) == 3 && hidden_states$size(1L) == 1L) {
         hidden_states = hidden_states$squeeze(1L)
@@ -328,39 +328,39 @@ CPCircuit = setRefClass("CPCircuit",
 
     inject_head = function(model) {
       # injects and initialize cp circuit heads (in particular the weights of gate and emissions) into the llm, takes as input an instance of LLMWrapper
-      
+
       ed = as.integer(model$embed_dim)
       vs = as.integer(model$vocab_size)
 
-      #trainable parameters
+      # trainable parameters
       layers = list(
         sum_unit_omega  = nn$Linear(ed, ranks),
         input_units_phi = nn$Linear(ed, as.integer(ranks * window_size * vs))
-        #note: the product units do not have trainable weights
+        # note: the product units do not have trainable weights
       )
 
-      #update the moduledict of the LLMWrapper class 
+      # update the moduledict of the LLMWrapper class
       model$heads$update(layers)
 
-      #initialize to zero the linear weights from embedding
+      # initialize to zero the linear weights from embedding
       nn$init$zeros_(model$heads[["sum_unit_omega"]]$weight)
       nn$init$zeros_(model$heads[["sum_unit_omega"]]$bias)
 
-      #initialization of the input weights so that they start as multiple copies (as the window size) of the output matrix of a stp llm
+      # initialization of the input weights so that they start as multiple copies (as the window size) of the output matrix of a stp llm
       with(torch$no_grad(), {
 
-        #take the shape of the backbone embeddings
+        # take the shape of the backbone embeddings
         if (!is.null(model$backbone$lm_head)) {
           stp_weight = model$backbone$lm_head$weight$detach()$clone()
         } else {
           stp_weight = model$backbone$get_output_embeddings()$weight$detach()$clone()
         }
-        #stp_weight shape: [vocabulary size, embedding_size] 
+        # stp_weight shape: [vocabulary size, embedding_size]
         H = as.integer(stp_weight$shape[1])
 
-        emission_init = stp_weight$unsqueeze(0L)$unsqueeze(0L)$ # [vocabulary size, embedding_size] -> [1, vocabulary size, embedding_size] -> [1, 1, vocabulary size, embedding_size] 
-          expand(ranks, window_size, -1L, -1L)$ # [1, 1, vocabulary size, embedding_size] -> [n_ranks, window_size, vocabulary size, embedding_size] 
-          reshape(-1L, H) # [n_ranks, window_size, vocabulary size, embedding_size] -> [n_ranks * window_size * vocabulary size, embedding_size] 
+        emission_init = stp_weight$unsqueeze(0L)$unsqueeze(0L)$ # [vocabulary size, embedding_size] -> [1, vocabulary size, embedding_size] -> [1, 1, vocabulary size, embedding_size]
+          expand(ranks, window_size, -1L, -1L)$ # [1, 1, vocabulary size, embedding_size] -> [n_ranks, window_size, vocabulary size, embedding_size]
+          reshape(-1L, H) # [n_ranks, window_size, vocabulary size, embedding_size] -> [n_ranks * window_size * vocabulary size, embedding_size]
 
         model$heads[["input_units_phi"]]$weight$copy_(emission_init)
         nn$init$zeros_(model$heads[["input_units_phi"]]$bias)
@@ -372,38 +372,38 @@ CPCircuit = setRefClass("CPCircuit",
       gate_logits = model$heads$sum_unit_omega(hidden_states) # [batch_size, seq_len, ranks]
       log_weights = F_$log_softmax(gate_logits, dim = -1L)
 
-      flat_emissions = model$heads$input_units_phi(hidden_states) #[batch_size, seq_len, ranks * window_size * vocab_size] 
+      flat_emissions = model$heads$input_units_phi(hidden_states) # [batch_size, seq_len, ranks * window_size * vocab_size]
       batch_size = as.integer(hidden_states$shape[0])
       seq_len    = as.integer(hidden_states$shape[1])
-      
+
       emissions = flat_emissions$view(
         c(batch_size, seq_len, as.integer(ranks), as.integer(window_size), as.integer(model$vocab_size))
       ) 
-      log_token_probs = F_$log_softmax(emissions, dim = -1L) # [batch_size, seq_len, ranks, window_size, vocab_size] 
-      
+      log_token_probs = F_$log_softmax(emissions, dim = -1L) # [batch_size, seq_len, ranks, window_size, vocab_size]
+
       # expansion of the gate for broadcasting [batch_size, seq_len, ranks, 1, 1]
       log_weights_exp = log_weights$unsqueeze(-1L)$unsqueeze(-1L) 
-      
-      #weighted mixure of each latent category, 
+
+      # weighted mixure of each latent category,
       sum_unit = torch$logsumexp(log_weights_exp + log_token_probs, dim = 2L)
-      
+
       return(sum_unit)
     },
 
     get_draft_probs = function(model, embeddings) {  
       # retrieves and formats draft gate and emission probabilities from last embedding
       with(torch$no_grad(), {
-        last_emb = embeddings$select(1L, -1L)$unsqueeze(1L) # [batch_size, seq_len, embedding_dim] -> [batch_size, 1, embedding_dim]      
+        last_emb = embeddings$select(1L, -1L)$unsqueeze(1L) # [batch_size, seq_len, embedding_dim] -> [batch_size, 1, embedding_dim]
 
-        gate_logits = model$heads$sum_unit_omega(last_emb) # [batch_size, 1, ranks]  
-        gate_probs  = F_$softmax(gate_logits, dim = -1L)$squeeze(1L) # [batch_size, ranks]   
+        gate_logits = model$heads$sum_unit_omega(last_emb) # [batch_size, 1, ranks]
+        gate_probs  = F_$softmax(gate_logits, dim = -1L)$squeeze(1L) # [batch_size, ranks]
 
-        flat_emissions = model$heads$input_units_phi(last_emb) # [batch_size, 1, ranks * window_size * vocab_size]   
+        flat_emissions = model$heads$input_units_phi(last_emb) # [batch_size, 1, ranks * window_size * vocab_size]
         batch_size = as.integer(last_emb$shape[0])
         emissions = flat_emissions$view(
           c(batch_size, as.integer(ranks), as.integer(window_size), as.integer(model$vocab_size))
-        )# [batch_size, ranks, window_size, vocab_size]     
-        emiss_probs = F_$softmax(emissions, dim = -1L) # [batch_size, ranks, window_size, vocab_size]        
+        )# [batch_size, ranks, window_size, vocab_size]
+        emiss_probs = F_$softmax(emissions, dim = -1L) # [batch_size, ranks, window_size, vocab_size]
 
         list(
           gate  = as.matrix(gate_probs$cpu()$numpy()), # [batch_size, ranks]
@@ -419,17 +419,17 @@ CPCircuit = setRefClass("CPCircuit",
       })
     },
     compute_prefix_probs = function(probs, draft_tokens, batch_idx = 1L) {
-      #computes the cumulative joint probability of the drafted tokens
+      # computes the cumulative joint probability of the drafted tokens
 
-      #probability of each latent state given the context
+      # probability of each latent state given the context
       alpha = probs$gate[batch_idx, ]
 
       q_values = numeric(length(draft_tokens))
       for (t in seq_along(draft_tokens)) {
-        #probability of each drafted token given the state and the context
+        # probability of each drafted token given the state and the context
         alpha = alpha * probs$emiss[batch_idx, , t, draft_tokens[t] + 1]
 
-        #comulative probability of the prefix sequence, marginalized over all states
+        # comulative probability of the prefix sequence, marginalized over all states
         q_values[t] = sum(alpha)
       }
       q_values
@@ -461,12 +461,11 @@ CPCircuit = setRefClass("CPCircuit",
 )
 
 build_btree_topology = function(window_size) {
-  # Balanced binary tree of latents over `window_size` token positions: recursively split a span
-  # at floor(len/2) down to single-token leaves (MTPC-BTree, Fig. 2). 1-based indices.
-  #   node_parent[k]  = parent internal-node index (0 for root)
-  #   token_parent[i] = internal-node index that emits token position i
-  # Internal nodes are numbered pre-order (parent index < child index).
-  node_parent = integer(0)
+  # balanced binary tree of latents over `window_size` token positions: recursively split a span at floor(len/2) down to single-token leaves.
+  # node_parent[k] = parent internal-node index (0 for root)
+  # token_parent[i] = internal-node index that emits token position i
+  # internal nodes are numbered pre-order (parent index < child index).
+  node_parent = c()
   token_parent = integer(window_size)
   build = function(toks, parent) {
     node_parent[[length(node_parent) + 1L]] <<- parent
@@ -498,8 +497,7 @@ BTreeCircuit = setRefClass("BTreeCircuit",
     },
 
     inject_head = function(model) {
-      # injects root-prior, tree-transition and per-position emission layers; uniform mixtures at
-      # every sum node (zeroed gates) + emissions copied from the STP lm_head -> BTree == FF at init
+      # injects root-prior, tree-transition and per-position emission layers; uniform mixtures at every sum node (zeroed gates) + emissions copied from the stp lm_head -> btree == ff at init
       ed = as.integer(model$embed_dim)
       vs = as.integer(model$vocab_size)
       layers = list(
@@ -522,7 +520,7 @@ BTreeCircuit = setRefClass("BTreeCircuit",
           stp_weight = model$backbone$get_output_embeddings()$weight$detach()$clone()
         }
         H = as.integer(stp_weight$shape[1])
-        # [vocab, embed] -> [window, ranks, vocab, embed] (HMM layout) -> [window*ranks*vocab, embed]
+        # [vocab, embed] -> [window, ranks, vocab, embed] (hmm layout) -> [window*ranks*vocab, embed]
         emission_init = stp_weight$unsqueeze(0L)$unsqueeze(0L)$
           expand(window_size, ranks, -1L, -1L)$
           reshape(-1L, H)
@@ -616,8 +614,7 @@ BTreeCircuit = setRefClass("BTreeCircuit",
     },
 
     get_conditional_dist = function(probs, accepted_prefix, batch_idx = 1L) {
-      # distribution over the next token given the accepted prefix: tree contraction carrying the
-      # vocab dimension along the query token's path (other tokens after the prefix marginalised out)
+      # distribution over the next token given the accepted prefix: tree contraction carrying the vocab dimension along the query token's path (other tokens after the prefix marginalised out)
       s = length(accepted_prefix)
       query_pos = s + 1L
       node_value = vector("list", n_internal)

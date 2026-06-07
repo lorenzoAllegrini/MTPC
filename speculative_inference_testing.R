@@ -10,10 +10,8 @@ PROBABILISTIC_HEADS = c("hmm", "ff", "cp", "btree")
 WINDOW_SIZE = 6L
 RANKS = 32L
 MAX_LEN = 2048L
-SHIFT_OFFSET_MINUS_1 = FALSE # Set to TRUE only if loading legacy checkpoints trained with shifted target alignment
-CHEAT = FALSE # Keep FALSE: cheat feeds the full answer into byT5's bidirectional encoder during
-              # training, so the model learns to copy it instead of predicting -> byte-salad at
-              # inference (the answer isn't in the encoder yet). Train and infer without cheat.
+SHIFT_OFFSET_MINUS_1 = FALSE # set to TRUE only if loading legacy checkpoints trained with shifted target alignment
+CHEAT = FALSE # keep FALSE: cheat feeds the full answer into byt5's encoder so it learns to copy instead of predict
 
 
 N_SAMPLES = 100L
@@ -26,7 +24,7 @@ run_inference_experiment = function(dataset, verifier_model, draft_model, circui
   sample_indices = sample(1:as.integer(dataset$num_rows), min(n_samples, as.integer(dataset$num_rows)))
   device = verifier_model$backbone$device
   
-  # Import Python garbage collector
+  # import python garbage collector
   gc_py = import("gc")
   
   res_list = list()
@@ -34,10 +32,10 @@ run_inference_experiment = function(dataset, verifier_model, draft_model, circui
     idx = sample_indices[i]
     cat(sprintf("\n--- Sample %d / %d (Dataset Index %d) ---\n", i, length(sample_indices), idx))
     
-    #current chat
+    # current chat
     msg = dataset[as.integer(idx - 1)]$messages
     p_txt = tokenizer$apply_chat_template(msg[1:(length(msg)-1)], chat_template = CHAT_TEMPLATE, tokenize = FALSE, add_generation_prompt = TRUE)
-    #first characters of the message
+    # first characters of the message
     pfx = substr(msg[[length(msg)]]$content, 1, 10)
     
     prompt_ids = tokenizer$encode(p_txt, add_special_tokens = FALSE, return_tensors = "pt")$to(device)
@@ -59,7 +57,7 @@ run_inference_experiment = function(dataset, verifier_model, draft_model, circui
       generated_text = safe_decode(tokenizer, as.integer(res$tokens))
     )
     
-    # Explicitly clear R and Python tensors/memory
+    # explicitly clear r and python tensors/memory
     rm(prompt_ids, initial_decoder_ids, res)
     gc()
     gc_py$collect()
@@ -87,7 +85,7 @@ run_inference_experiment = function(dataset, verifier_model, draft_model, circui
 device = get_device()
 tokenizer = transformers$AutoTokenizer$from_pretrained(MODEL_ID)
 
-# Ensure dataset is available
+# ensure dataset is available
 if (!exists("dataset")) {
   cat("\n[SYSTEM] Dataset 'dataset' not found in workspace. Loading and splitting 'ai2-adapt-dev/flan_v2_converted'...\n")
   splits = load_tulu_dataset("ai2-adapt-dev/flan_v2_converted", max_samples = 1000L)
@@ -105,8 +103,7 @@ verifier_model$eval()
 # accumulates per-head experiment results keyed by head_type
 all_results = list()
 get_inference_paths = function(head_type, window_size) {
-  # Explicit model paths (window 6 checkpoints). HMM uses its real adapter/head
-  # (lora_hmm_w6 + mtp_head_hmm_w6_final), not a .pth as a backbone.
+  # explicit model paths (window 6 checkpoints); hmm uses its real adapter/head, not a .pth backbone
   return(switch(head_type,
     "ff"  = list(lora_dir = "saved_models/lora_ff_w6/mtp_backbone_lora_ff_w6", weights_path = "saved_models/mtp_head_ff_w6_final.pth"),
     "cp"  = list(lora_dir = "saved_models/lora_cp_w6/mtp_backbone_lora_cp_w6",   weights_path = "saved_models/mtp_head_cp_w6_final.pth"),
@@ -115,8 +112,8 @@ get_inference_paths = function(head_type, window_size) {
     stop(sprintf("Unknown head_type: %s", head_type))
   ))
 
-  # ----- legacy auto-resolution (unreachable, kept for reference) -----
-  # 1. Check if v1 reference models exist in saved_models
+  # legacy auto-resolution (unreachable, kept for reference)
+  # check if v1 reference models exist in saved_models
   v1_lora = sprintf("saved_models/lora_%s_w%d_phase1_v1", head_type, window_size)
   v1_weights = sprintf("saved_models/mtp_head_%s_w%d_phase1_v1.pth", head_type, window_size)
   
@@ -124,12 +121,12 @@ get_inference_paths = function(head_type, window_size) {
     return(list(lora_dir = v1_lora, weights_path = v1_weights))
   }
   
-  # 2. Check standard path in saved_models or legacy_models
+  # check standard path in saved_models or legacy_models
   lora_dir = sprintf("saved_models/lora_%s_w%d/mtp_backbone_lora_%s_w%d", head_type, window_size, head_type, window_size)
   weights_path = sprintf("saved_models/mtp_head_%s_w%d_final.pth", head_type, window_size)
   
   if (!file.exists(weights_path) || !file.exists(lora_dir)) {
-    # Check legacy_models
+    # check legacy_models
     legacy_lora = sprintf("legacy_models/lora_%s_w%d/mtp_backbone_lora_%s_w%d", head_type, window_size, head_type, window_size)
     legacy_weights = sprintf("legacy_models/mtp_head_%s_w%d_final.pth", head_type, window_size)
     if (file.exists(legacy_weights) && file.exists(legacy_lora)) {
@@ -138,9 +135,9 @@ get_inference_paths = function(head_type, window_size) {
     }
   }
   
-  # Fallbacks for specific custom paths in saved_models or legacy_models
+  # fallbacks for specific custom paths in saved_models or legacy_models
   if (!file.exists(weights_path) || !file.exists(lora_dir)) {
-    # Check Phase 1 in legacy_models
+    # check phase 1 in legacy_models
     alt_lora = sprintf("legacy_models/lora_%s_w%d_phase1", head_type, window_size)
     alt_weights = sprintf("legacy_models/mtp_head_%s_w%d_phase1.pth", head_type, window_size)
     if (file.exists(alt_weights) && file.exists(alt_lora)) {

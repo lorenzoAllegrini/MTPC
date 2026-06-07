@@ -24,8 +24,7 @@ LLMWrapper = setRefClass("LLMWrapper",
     initialize = function(model_id, head_type = NULL, window_size = 6L, ranks = 32L, lora_path = NULL, lora_r = 8L, lora_alpha = 16L, cheat = FALSE) {
       cheat <<- as.logical(cheat)
       # initializes the llm wrapper by loading the backbone model, configuring lora, and setting up the module dict
-      # float32 on every device: the heads are float32, so a bf16 backbone would raise a dtype
-      # mismatch in the head forward on CUDA. byT5-small is small enough that float32 is fine.
+      # float32 on every device: heads are float32, so a bf16 backbone would raise a dtype mismatch in the head forward on cuda; byt5-small is small enough that float32 is fine
       best_dtype = torch$float32
 
       backbone <<- transformers$T5ForConditionalGeneration$from_pretrained(
@@ -130,10 +129,10 @@ LLMWrapper = setRefClass("LLMWrapper",
       
       if (!is.null(labels)) {
         if (cheat) {
-          # Training (cheating): do not mask assistant tokens
+          # training (cheating): do not mask assistant tokens
           encoder_input_ids = prompt_ids
         } else {
-          # Training (standard): mask assistant tokens in prompt_ids
+          # training (standard): mask assistant tokens in prompt_ids
           encoder_input_ids = prompt_ids$clone()
           encoder_input_ids[labels$ne(-100L)] = as.integer(backbone$config$decoder_start_token_id)
         }
@@ -180,14 +179,14 @@ LLMWrapper = setRefClass("LLMWrapper",
       N = length(draft_tokens)
       
       with(torch$no_grad(), {
-        #concatenates prefix tokens with drafted ones
+        # concatenates prefix tokens with drafted ones
         draft_tensor = torch$tensor(matrix(draft_tokens, nrow = 1), dtype = torch$long, device = backbone$device)
         next_ids = torch$cat(list(decoder_ids, draft_tensor), dim = 1L)
         
-        if (is.list(encoder_outputs)) {encoder_outputs = reticulate::tuple(encoder_outputs[[1]])} #correct format for hugging face
+        if (is.list(encoder_outputs)) {encoder_outputs = reticulate::tuple(encoder_outputs[[1]])} # correct format for hugging face
  
 
-        # In cheating mode: we concatenate generated context up to this point to the encoder input
+        # in cheating mode: we concatenate generated context up to this point to the encoder input
         P = as.integer(prompt_ids$size(1L))
         if (decoder_ids$size(1L) > P + 1L) {
           generated_tokens = decoder_ids$narrow(1L, P + 1L, as.integer(decoder_ids$size(1L) - (P + 1L)))
@@ -209,7 +208,7 @@ LLMWrapper = setRefClass("LLMWrapper",
           decoder_input_ids = next_ids,
           encoder_outputs = encoder_outputs,
           use_cache = FALSE # here we do not use kv cache for simplification
-        ) #here an additional logit is generated
+        ) # here an additional logit is generated
         
         all_logits = outputs$logits
         L = as.integer(decoder_ids$size(1L))
@@ -218,12 +217,12 @@ LLMWrapper = setRefClass("LLMWrapper",
         relevant_logits = all_logits$narrow(1L, as.integer(L - 1L), as.integer(N + 1L)) # [batch_size, len(draft_tokens)+1, vocab_size]
         all_p_dist = F_$softmax(relevant_logits, dim = -1L)
         
-        draft_p_dist = all_p_dist$narrow(1L, 0L, as.integer(N)) #discard the additional logit
+        draft_p_dist = all_p_dist$narrow(1L, 0L, as.integer(N)) # discard the additional logit
 
-        #take the probability of the drafted tokens
+        # take the probability of the drafted tokens
         p_vals = draft_p_dist$gather(dim = 2L, index = draft_tensor$unsqueeze(-1L))$squeeze(-1L)
 
-        #take probability distribution of the bonus token
+        # take probability distribution of the bonus token
         next_p_dist = all_p_dist$select(1L, as.integer(N))
         
         list(
@@ -240,7 +239,7 @@ LLMWrapper = setRefClass("LLMWrapper",
         device = backbone$device
       }
       
-      # Import our training module to reuse the Python load_head_weights logic
+      # import our training module to reuse the python load_head_weights logic
       reticulate::py_run_string("import sys")
       sys_path = reticulate::py_eval("sys.path")
       if (!("/Users/lorenzoallegrini/Documents/MTP/src" %in% sys_path)) {

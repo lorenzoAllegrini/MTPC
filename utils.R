@@ -1,19 +1,19 @@
-# Shared non-analysis utility and helper functions for speculative decoding
+# shared non-analysis utility and helper functions for speculative decoding
 
 CHAT_TEMPLATE = "{% for message in messages %}{{ '<|' + message['role'] + '|>\\n' + message['content'] + '<|end|>\\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>\\n' }}{% endif %}"
 
-# Compute speculative decoding statistics from raw list of experiment results
+# compute speculative decoding statistics from raw list of experiment results
 compute_speculative_decoding_metrics = function(res_list) {
   # computes global and round-by-round speculative decoding metrics from experiment results
-  # 1. Direct vector extraction of texts
+  # direct vector extraction of texts
   generated_texts = sapply(res_list, function(x) x$generated_text)
   prompt_texts    = sapply(res_list, function(x) x$prompt_text)
   
-  # 2. Sum global speculative metrics
+  # sum global speculative metrics
   global_accepted = sum(sapply(res_list, function(x) x$total_accepted))
   global_proposed = sum(sapply(res_list, function(x) x$total_proposed))
   
-  # 3. Process and pad the ragged acceptance list
+  # process and pad the ragged acceptance list
   acceptance_list = lapply(res_list, function(x) x$round_accepted)
   max_rounds      = max(sapply(acceptance_list, length))
   
@@ -21,7 +21,7 @@ compute_speculative_decoding_metrics = function(res_list) {
     c(x, rep(NA, max_rounds - length(x)))
   })
   
-  # Row-wise binding to build the aligned matrix
+  # row-wise binding to build the aligned matrix
   results_matrix = do.call(rbind, padded_list)
   
   return(list(

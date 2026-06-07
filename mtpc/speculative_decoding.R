@@ -3,17 +3,16 @@ library(reticulate)
 self_speculative_decoding_step = function(verifier_model, draft_model, prompt_ids, decoder_ids, circuit, lookahead_k = 4, draft_encoder_outputs = NULL, verifier_encoder_outputs = NULL, attention_mask = NULL, tokenizer = NULL, verbose = FALSE) {
   # function that recreates the novel self speculative decoding introduced in the paper, pag 19
 
-  #compute last embedding
+  # compute last embedding
   hidden_states = llm_get_hidden_states(draft_model, prompt_ids, decoder_ids, attention_mask = attention_mask, encoder_outputs = draft_encoder_outputs)$x
 
-  # draft from the last hidden state: the MTP head is trained so step 1 predicts the immediate
-  # next token (paper-aligned compute_mtpc_loss), matching the verifier which scores from L-1.
+  # draft from the last hidden state: the mtp head is trained so step 1 predicts the immediate next token, matching the verifier which scores from L-1
   probs = circuit$get_draft_probs(draft_model, hidden_states)
   drafted_tokens = circuit$generate_draft(probs)
   
   if (!is.null(tokenizer) && verbose) {draft_str = safe_decode(tokenizer, as.integer(drafted_tokens)); cat(sprintf(" drafted tokens: '%s'\n", draft_str))}
 
-  #cumulative prefix probability for each token 
+  # cumulative prefix probability for each token
   q_prefix = circuit$compute_prefix_probs(probs, drafted_tokens)
   
   verification = llm_verify_draft(
@@ -35,7 +34,7 @@ self_speculative_decoding_step = function(verifier_model, draft_model, prompt_id
   # each token is accepted with probability p_vals/q_cond
   accepted_mask = runif(n) <= (p_vals / q_cond)
 
-  #take the first false and set the remaining to false too
+  # take the first false and set the remaining to false too
   first_false = which(!accepted_mask)
   s = if (length(first_false) > 0) first_false[1] - 1 else n
   
@@ -47,7 +46,7 @@ self_speculative_decoding_step = function(verifier_model, draft_model, prompt_id
                   i, token_str, q_cond[i], p_vals[i], 
                   if (accepted) "ACCETTATO" else "RIGETTATO"))
       
-      # Print verifier top-5 for this position
+      # print verifier top-5 for this position
       if (!is.null(tokenizer)) {
         pos_dist = verification$full_p_dist$select(1L, as.integer(i - 1L))$squeeze(0L)
         top_pos = torch$topk(pos_dist$cpu(), 5L)
@@ -64,7 +63,7 @@ self_speculative_decoding_step = function(verifier_model, draft_model, prompt_id
     }
   }
 
-  # 4. Generazione del Bonus Token
+  # generate the bonus token
   if (s < n) {
     p_dist_err = verification$full_p_dist$select(1L, as.integer(s))$squeeze(0L)
     
@@ -92,14 +91,14 @@ self_speculative_decoding_step = function(verifier_model, draft_model, prompt_id
       }
     }
     
-    # CPU Fallback for multinomial sampling due to PyTorch MPS backend bug
+    # cpu fallback for multinomial sampling due to PyTorch MPS backend bug
     next_token = torch$multinomial(r_x$cpu(), num_samples = 1L)$item()
     if (!is.null(tokenizer) && verbose) {
        cat(sprintf("    - [%d] Bonus (M): '%s' (Sostituzione)\n", s + 1, safe_decode(tokenizer, as.integer(next_token))))
     }
   } else {
     bonus_p_dist = verification$full_p_dist$select(1L, as.integer(n))$squeeze(0L)
-    # CPU Fallback for multinomial sampling due to PyTorch MPS backend bug
+    # cpu fallback for multinomial sampling due to PyTorch MPS backend bug
     next_token = torch$multinomial(bonus_p_dist$cpu(), num_samples = 1L)$item()
     if (!is.null(tokenizer) && verbose) {
        cat(sprintf("    - [%d] Bonus (P): '%s'\n", n + 1, safe_decode(tokenizer, as.integer(next_token))))
@@ -130,8 +129,8 @@ generate_speculative = function(verifier_model, draft_model, prompt_ids, circuit
     pad_id = as.integer(verifier_model$backbone$config$pad_token_id)
     attention_mask = prompt_ids$ne(pad_id)$to(torch$long)
 
-    # If in cheating mode: do not precompute static encoder outputs since encoder inputs grow at each step.
-    # Otherwise, precompute static prompt encoder outputs once to optimize inference speed.
+    # in cheating mode skip precomputing encoder outputs since encoder inputs grow each step
+    # otherwise precompute static prompt encoder outputs once to optimize inference speed
     if (verifier_model$cheat) {
       draft_encoder_outputs = NULL
       verifier_encoder_outputs = NULL
