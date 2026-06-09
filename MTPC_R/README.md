@@ -1,83 +1,94 @@
 # MTPC — Multi-Token Prediction with Probabilistic Circuits — R re-implementation
 
-**Project report — code structure**
+R re-implementation of *"Fast and Expressive Multi-Token Prediction with Probabilistic
+Circuits"* (MTPC, arXiv 2511.11346): a **byT5-small** model is retrofitted with a
+probabilistic-circuit head that models the *joint* distribution over the next *n* tokens,
+and that head is used as the **draft model** in self-speculative decoding. Everything is in
+R; the PyTorch / Hugging Face back-ends (`torch`, `transformers`, `peft`, `datasets`) are
+driven through **`reticulate`** — there is no project Python code.
 
-This package is an **R** re-implementation of *"Fast and Expressive Multi-Token Prediction
-with Probabilistic Circuits"* (MTPC, arXiv 2511.11346). We retrofit a small encoder–decoder
-language model (**byT5-small**) with a probabilistic-circuit head that models the *joint*
-distribution over the next *n* tokens, and use it as the **draft model** in self-speculative
-decoding, verified token-by-token against the model's standard single-token head.
-
-The whole pipeline is written in R; the PyTorch / Hugging Face tensors and model
-(`torch`, `transformers`, `peft`, `datasets`) are driven through the **`reticulate`**
-bridge. There is no project Python source code.
-
-## What is implemented
-
-- **Four probabilistic-circuit heads** parameterising `q(x_{t+1..t+n} | context)`:
-  - `FF` — fully factorised (independent per-position heads),
-  - `CP` — canonical polyadic (one shared latent, rank-`R` mixture),
-  - `HMM` — inhomogeneous hidden Markov chain over the window,
-  - `BTree` — balanced binary tree of latents over the window.
-- **Three-phase training** (backbone SFT → FF warm-up → target-circuit joint training, with
-  the target circuit initialised from the trained FF head so it starts equivalent to FF).
-- **Self-speculative decoding** (paper Algorithm 3): the circuit drafts an `n`-token window
-  (by `argmax` or by `ancestral` sampling of its latents), the verifier accepts/rejects
-  with probability `min(1, p/q)`, and a residual bonus token is sampled on the first reject.
-- **Statistical analysis** of the acceptance rates across circuits (CIs, normality/variance
-  checks, Friedman + post-hoc tests, plots).
-
-## Code structure
+The code splits into a **core library** (`mtpc/`) and **three entry-point scripts** that
+follow the workflow of the project: **training → inference → analysis**.
 
 ```
-mtpc/                              core library
-  probabilistic_circuits.R         the 4 circuits: inject_head (parameters + init),
-                                    forward (marginals q(x_i)), generate_draft,
-                                    compute_prefix_probs / get_conditional_dist (for decoding)
-  llm.R                            LLMWrapper: byT5 backbone + LoRA + the active head;
-                                    hidden-state extraction, draft verification, load/save
-  speculative_decoding.R           Algorithm 3: one decoding step + the generation loop
-  utils.R                          device, batching, MTPC loss, safe_decode
-
-training.R                         3-phase training of any circuit (config at the top)
-speculative_inference_testing.R    self-speculative-decoding benchmark over all circuits
-inference_analisys.R               statistical analysis + plots of the benchmark results
-utils.R                            dataset loading, metrics, circuit factory
-
-benchmark_results/                 report, plots and raw results of the experiments
-saved_models/                      trained checkpoints (not bundled — see "Trained models")
+mtpc/                              core library (shared building blocks)
+  llm.R
+  probabilistic_circuits.R
+  speculative_decoding.R
+  utils.R
+utils.R
+training.R                         (1) training
+speculative_inference_testing.R    (2) inference / benchmark
+inference_analisys.R               (3) analysis
+benchmark_results/                 outputs of steps (2) and (3)
+saved_models/                      checkpoints produced by step (1)  [not bundled — see end]
 ```
 
-## How the pieces fit together
+## 1. Training — `training.R`
 
-```
-                 training.R                 speculative_inference_testing.R     inference_analisys.R
- dataset ─▶ phase 0: backbone SFT ─┐
-           phase 1: FF warm-up ────┤        verifier (STP head) ┐
-           phase 2: target circuit ┴─▶ ─┐   draft   (circuit)   ┴─▶ generate_speculative ─▶ results.rds ─▶ stats + plots
-                                        └── saved_models/ ──────────┘
-```
+`training.R` trains a chosen circuit (`HEAD_TYPE` ∈ `ff` / `cp` / `hmm` / `btree`) in three
+phases: **(0)** autoregressive backbone fine-tuning, **(1)** feed-forward warm-up, **(2)**
+joint training of the target circuit, initialised from the trained FF head so it starts
+equivalent to it. It builds on three library files:
 
-`mtpc/` is the reusable library; the three top-level scripts are the entry points
-(train → benchmark → analyse). Every script is configured by a small block of constants
-at its top (head type, window size, ranks, sampling strategy, phase flags).
+- **`mtpc/llm.R` — `LLMWrapper`** is the central object: it wraps the byT5 backbone with a
+  LoRA adapter and the *active* speculative head, and exposes `swap_head()`, decoder
+  hidden-state extraction, and head weight save/load. Both training and inference build on it.
+- **`mtpc/probabilistic_circuits.R` — the four circuits** (`FF`, `CP`, `HMM`, `BTree`). Each
+  defines `inject_head()` (creates and initialises its parameters in the wrapper) and
+  `forward()` (the per-position marginals `q(x_i)` consumed by the loss). Phase 2 copies the
+  trained FF emissions into the target circuit's parameters.
+- **`utils.R` / `mtpc/utils.R`** supply the dataset loading and batching, the discounted
+  multi-token objective `compute_mtpc_loss`, the device helper, and the circuit factory.
+
+**Output → `saved_models/`**: the LoRA adapter and the head weights (`.pth`) for the circuit.
+
+## 2. Inference — `speculative_inference_testing.R`
+
+`speculative_inference_testing.R` loads a frozen **verifier** (the backbone's standard
+single-token head) and a **draft** circuit — its head weights restored with
+`LLMWrapper$load_weights()` (a pure-R state-dict loader) — then runs self-speculative
+decoding over a sample of prompts and records the acceptance metrics. It builds on:
+
+- **`mtpc/speculative_decoding.R`** implements the paper's Algorithm 3:
+  `self_speculative_decoding_step()` (draft a window, verify it, accept/reject each token
+  with prob `min(1, p/q)`, sample a residual bonus token on the first rejection) and
+  `generate_speculative()` (the full generation loop). The `SAMPLING` config selects how the
+  circuit drafts — `"argmax"` (greedy) or `"ancestral"` (sample the circuit's latents).
+- **`mtpc/probabilistic_circuits.R` (inference side)** — beyond `forward()`, each circuit
+  provides `get_draft_probs()`, `generate_draft(sampling = …)`, `compute_prefix_probs()` and
+  `get_conditional_dist()`: the quantities the acceptance test and the bonus token need.
+- **`mtpc/utils.R` — `safe_decode()`** (token ids → text) and **`utils.R`** — the
+  speculative-decoding metrics aggregator.
+
+**Output → `benchmark_results/results_benchmark_w6.rds`**: per-prompt accepted-token counts
+and generated text, for every circuit.
+
+## 3. Analysis — `inference_analisys.R`
+
+`inference_analisys.R` reads the benchmark `.rds` and produces the statistical comparison
+across the circuits: descriptive metrics (acceptance rate, mean tokens/round), 95 %
+confidence intervals (t-test and bootstrap, via the `boot` package), assumption checks
+(Shapiro–Wilk normality, Bartlett homogeneity), the Friedman test with a post-hoc pairwise
+Wilcoxon, and the comparison plots.
+
+**Output → `benchmark_results/`**: the written report and the bar / box / density plots
+(metric = mean acceptance rate, i.e. tokens accepted per round, out of the window size).
 
 ## Results (window = 6, 50 prompts, self-speculative, `argmax` draft)
 
-Mean acceptance rate = tokens accepted per draft/verify round (out of 6):
-
 | circuit | tokens/round | acceptance |
 |---------|-------------:|-----------:|
-| CP        | 1.80 / 6   | 30.1 % |
+| CP        | 1.80 / 6     | 30.1 % |
 | **BTree** | **1.66 / 6** | **27.6 %** |
-| HMM       | 1.33 / 6   | 22.2 % |
-| FF        | 1.10 / 6   | 18.4 % |
+| HMM       | 1.33 / 6     | 22.2 % |
+| FF        | 1.10 / 6     | 18.4 % |
 
 BTree is statistically tied with CP (post-hoc Wilcoxon *p* = 0.24) and significantly above
-HMM and FF (Friedman χ² = 76.1, *p* ≈ 2e-16). Full write-up, plots and tests in
+HMM and FF (Friedman χ² = 76.1, *p* ≈ 2e-16). Full write-up in
 [`benchmark_results/btree_report.md`](benchmark_results/btree_report.md).
 
-## Requirements and running
+## Setup and running
 
 R (≥ 4.1) with `reticulate` and `boot`, plus a Python env reachable by reticulate with
 `torch`, `transformers`, `peft`, `datasets`:
@@ -87,15 +98,12 @@ python -m venv .venv && . .venv/bin/activate && pip install torch transformers p
 ```
 
 ```r
-Rscript training.R                       # train a circuit (set HEAD_TYPE at the top)
-Rscript speculative_inference_testing.R  # benchmark (set SAMPLING = "argmax" | "ancestral")
-Rscript inference_analisys.R             # statistics + plots
+Rscript training.R                       # step 1 — set HEAD_TYPE / phase flags at the top
+Rscript speculative_inference_testing.R  # step 2 — set SAMPLING = "argmax" | "ancestral"
+Rscript inference_analisys.R             # step 3
 ```
 
-### Trained models
-
-The checkpoints (~1.3 GB) are not bundled; place them under `saved_models/` as
-`byt5_standard_lora_phase0/` (verifier), `lora_<c>_w6/…` + `mtp_head_<c>_w6_final.pth`
-for `c ∈ {cp, hmm, btree}`, and `lora_ff_w6_phase1/` + `mtp_head_ff_w6_phase1.pth`.
-Without them, `training.R` still trains from scratch (the dataset is downloaded
-automatically).
+**Trained models** (~1.3 GB) are not bundled; place them under `saved_models/` as
+`byt5_standard_lora_phase0/` (verifier), `lora_ff_w6_phase1/` + `mtp_head_ff_w6_phase1.pth`,
+and `lora_<c>_w6/…` + `mtp_head_<c>_w6_final.pth` for `c ∈ {cp, hmm, btree}`. Without them,
+`training.R` still trains from scratch (the dataset is downloaded automatically).
