@@ -99,12 +99,15 @@ verifier_model$eval()
 all_results = list()
 get_inference_paths = function(head_type) {
   # model paths for the window-6 checkpoints
-  switch(head_type,
-    "ff"    = list(lora_dir = "saved_models/lora_ff_w6/mtp_backbone_lora_ff_w6",       weights_path = "saved_models/mtp_head_ff_w6_final.pth"),
-    "cp"    = list(lora_dir = "saved_models/lora_cp_w6/mtp_backbone_lora_cp_w6",       weights_path = "saved_models/mtp_head_cp_w6_final.pth"),
-    "hmm"   = list(lora_dir = "saved_models/lora_hmm_w6/mtp_backbone_lora_hmm_w6",     weights_path = "saved_models/mtp_head_hmm_w6_final.pth"),
-    "btree" = list(lora_dir = "saved_models/lora_btree_w6/mtp_backbone_lora_btree_w6", weights_path = "saved_models/mtp_head_btree_w6_final.pth")
-  )
+  if (head_type == "ff") {
+    list(lora_dir = "saved_models/lora_ff_w6/mtp_backbone_lora_ff_w6", weights_path = "saved_models/mtp_head_ff_w6_final.pth")
+  } else if (head_type == "cp") {
+    list(lora_dir = "saved_models/lora_cp_w6/mtp_backbone_lora_cp_w6", weights_path = "saved_models/mtp_head_cp_w6_final.pth")
+  } else if (head_type == "hmm") {
+    list(lora_dir = "saved_models/lora_hmm_w6/mtp_backbone_lora_hmm_w6", weights_path = "saved_models/mtp_head_hmm_w6_final.pth")
+  } else {
+    list(lora_dir = "saved_models/lora_btree_w6/mtp_backbone_lora_btree_w6", weights_path = "saved_models/mtp_head_btree_w6_final.pth")
+  }
 }
 
 for (head_type in PROBABILISTIC_HEADS) {
