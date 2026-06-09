@@ -64,14 +64,14 @@ load_model_weights = function(model, weights_path, device) {
 }
 
 safe_decode = function(tokenizer, tokens) {
-  # safely decodes tokens into an R string by doing the replacement in Python first
-  tokens_list = as.list(as.integer(tokens))
-  main = reticulate::import("__main__")
-  reticulate::py_run_string("
-def py_safe_decode(tokenizer, tokens):
-    s = tokenizer.decode(tokens)
-    return s.replace(chr(0), '<NUL>')
-")
-  cleaned_str = main$py_safe_decode(tokenizer, tokens_list)
-  return(as.character(cleaned_str))
+  # decodes tokens to an r string; r strings cannot hold an embedded nul (\x00), so on the rare
+  # nul byte we rebuild the text from byt5 bytes (byte value = token id - 3) and mark nul as <NUL>
+  ids = as.integer(tokens)
+  tryCatch(as.character(tokenizer$decode(as.list(ids))), error = function(e) {
+    b = ids[ids >= 3L & ids <= 258L] - 3L
+    if (!length(b)) return("")
+    segs = split(b, cumsum(b == 0L))
+    paste(vapply(segs, function(x) { x = x[x != 0L]; s = rawToChar(as.raw(x)); Encoding(s) <- "UTF-8"; s },
+                 character(1)), collapse = "<NUL>")
+  })
 }

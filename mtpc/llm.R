@@ -234,30 +234,26 @@ LLMWrapper = setRefClass("LLMWrapper",
     },
 
     load_weights = function(weights_path, device = NULL, shift_offset_minus_1 = FALSE) {
-      # loads pre-trained speculative head weights from a file path
-      if (is.null(device)) {
-        device = backbone$device
+      # loads pre-trained speculative head weights from a .pth file (pure r, no python project code)
+      if (is.null(device)) device = backbone$device
+      if (isTRUE(shift_offset_minus_1))
+        stop("shift_offset_minus_1 (legacy alignment shift) is not supported; load aligned checkpoints")
+      state_dict = torch$load(weights_path, map_location = device)
+      # rename any legacy parameter keys to the canonical head names, then load non-strictly
+      remap = c("gate." = "sum_unit_omega.", "init_gate." = "sum_unit_omega_init.",
+                "emission_projs." = "input_units_phi.", "emissions." = "input_units_phi.",
+                "transitions." = "sum_unit_omega_transitions.")
+      canonical = list()
+      for (k in names(state_dict)) {
+        nk = k
+        if (grepl("^emission_[0-9]+\\.", k)) {
+          nk = sub("^emission_([0-9]+)\\.", "input_units_phi_\\1.", k)
+        } else {
+          for (pre in names(remap)) if (startsWith(k, pre)) { nk = paste0(remap[[pre]], substring(k, nchar(pre) + 1L)); break }
+        }
+        canonical[[nk]] = state_dict[[k]]
       }
-      
-      # import our training module to reuse the python load_head_weights logic
-      reticulate::py_run_string("import sys")
-      sys_path = reticulate::py_eval("sys.path")
-      if (!("/Users/lorenzoallegrini/Documents/MTP/src" %in% sys_path)) {
-        reticulate::py_run_string("sys.path.append('/Users/lorenzoallegrini/Documents/MTP/src')")
-      }
-      training_py = reticulate::import("training")
-      
-      target_window_size = as.integer(circuit$window_size)
-      target_ranks = as.integer(circuit$ranks)
-      
-      training_py$load_head_weights(
-        model_heads = heads,
-        weights_path = weights_path,
-        device = device,
-        shift_offset_minus_1 = shift_offset_minus_1,
-        target_window_size = target_window_size,
-        ranks = target_ranks
-      )
+      heads$load_state_dict(canonical, strict = FALSE)
       invisible(.self)
     },
 
