@@ -1,6 +1,5 @@
 # statistical analysis of mtpc speculative decoding inference results
 
-# load required packages
 library(boot)
 source("utils.R")
 
@@ -9,7 +8,6 @@ if (interactive() && requireNamespace("rstudioapi", quietly = TRUE)) {
   setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 }
 
-# set plot margins: bottom, left, top, right
 par(mar=c(4, 4, 2, 1))
 
 # find and load the benchmark results (dynamic detection of w6 or w4)
@@ -22,7 +20,6 @@ if (!file.exists(file_path)) {
   stop("Error: No benchmark results file found (results_benchmark_w6.rds or results_benchmark_w4.rds).")
 }
 
-# extract window size from loaded filename
 window_size = 6L
 if (grepl("w4", file_path)) window_size = 4L
 if (grepl("w6", file_path)) window_size = 6L
@@ -80,7 +77,6 @@ build_perf_df = function(perf_matrix) {
 
 # analysis and execution
 
-# header output
 cat("========================================================================\n")
 cat("      SPECULATIVE DECODING INFERENCE ANALYSIS - MTPC REPORT             \n")
 cat("========================================================================\n")
@@ -89,7 +85,6 @@ cat(sprintf("Window Size : %d\n", window_size))
 cat(sprintf("Models      : %s\n", paste(toupper(probabilistic_heads), collapse = ", ")))
 cat("========================================================================\n\n")
 
-# extract the performance matrix
 perf_matrix = build_perf_matrix(probabilistic_heads, all_results, window_size)
 
 

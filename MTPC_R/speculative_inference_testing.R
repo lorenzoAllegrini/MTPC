@@ -25,7 +25,6 @@ run_inference_experiment = function(dataset, verifier_model, draft_model, circui
   sample_indices = sample(1:as.integer(dataset$num_rows), min(n_samples, as.integer(dataset$num_rows)))
   device = verifier_model$backbone$device
   
-  # import python garbage collector
   gc_py = import("gc")
   
   res_list = list()
@@ -33,10 +32,8 @@ run_inference_experiment = function(dataset, verifier_model, draft_model, circui
     idx = sample_indices[i]
     cat(sprintf("\n--- Sample %d / %d (Dataset Index %d) ---\n", i, length(sample_indices), idx))
     
-    # current chat
     msg = dataset[as.integer(idx - 1)]$messages
     p_txt = tokenizer$apply_chat_template(msg[1:(length(msg)-1)], chat_template = CHAT_TEMPLATE, tokenize = FALSE, add_generation_prompt = TRUE)
-    # first characters of the message
     pfx = substr(msg[[length(msg)]]$content, 1, 10)
     
     prompt_ids = tokenizer$encode(p_txt, add_special_tokens = FALSE, return_tensors = "pt")$to(device)
@@ -75,7 +72,6 @@ run_inference_experiment = function(dataset, verifier_model, draft_model, circui
     })
   }
   
-  # compute metrics using the modular function
   metrics = compute_speculative_decoding_metrics(res_list)
   
   cat(sprintf("\nglobal acceptance: %.2f%%\n", (metrics$global_accepted / metrics$global_proposed) * 100))
@@ -95,13 +91,11 @@ if (!exists("dataset")) {
 
 torch_py = import("torch")
 
-# verifier model initialization
 VERIFIER_LORA_DIR = "saved_models/byt5_standard_lora_phase0"
 verifier_model = LLMWrapper(model_id = MODEL_ID, lora_path = VERIFIER_LORA_DIR, cheat = CHEAT)
 verifier_model$to(device)
 verifier_model$eval()
 
-# accumulates per-head experiment results keyed by head_type
 all_results = list()
 get_inference_paths = function(head_type, window_size) {
   # explicit model paths (window 6 checkpoints); hmm uses its real adapter/head, not a .pth backbone
@@ -163,7 +157,6 @@ for (head_type in PROBABILISTIC_HEADS) {
     cheat = CHEAT
   )
    
-  # load pretrained MTP head weights onto CPU before moving to target device
   if (file.exists(paths$weights_path)) {
     draft_model$load_weights(paths$weights_path, device = "cpu", shift_offset_minus_1 = SHIFT_OFFSET_MINUS_1)
   }

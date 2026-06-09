@@ -56,7 +56,6 @@ HMMCircuit = setRefClass("HMMCircuit",
         input_units_phi = nn$Linear(ed, as.integer(window_size * ranks * vs)),
         sum_unit_omega_transitions = nn$Linear(ed, as.integer((window_size - 1L) * ranks * ranks)) # inhomogeneous hmm!
       )
-      # call to ModuleDict
       model$heads$update(layers)
 
       # state gates initialized to zero, will be changed in a few lines
@@ -71,10 +70,8 @@ HMMCircuit = setRefClass("HMMCircuit",
       bias_tensor$diagonal(dim1 = -2L, dim2 = -1L)$fill_(5.0)
 
       with(torch$no_grad(), {
-        # insert bias vector
         model$heads[["sum_unit_omega_transitions"]]$bias$copy_(bias_tensor$flatten())
 
-        # retrieve stp weights
         if (!is.null(model$backbone$lm_head)) {
           stp_weight = model$backbone$lm_head$weight$detach()$clone()
         } else {

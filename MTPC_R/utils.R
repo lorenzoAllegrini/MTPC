@@ -5,11 +5,9 @@ CHAT_TEMPLATE = "{% for message in messages %}{{ '<|' + message['role'] + '|>\\n
 # compute speculative decoding statistics from raw list of experiment results
 compute_speculative_decoding_metrics = function(res_list) {
   # computes global and round-by-round speculative decoding metrics from experiment results
-  # direct vector extraction of texts
   generated_texts = sapply(res_list, function(x) x$generated_text)
   prompt_texts    = sapply(res_list, function(x) x$prompt_text)
   
-  # sum global speculative metrics
   global_accepted = sum(sapply(res_list, function(x) x$total_accepted))
   global_proposed = sum(sapply(res_list, function(x) x$total_proposed))
   
@@ -21,7 +19,6 @@ compute_speculative_decoding_metrics = function(res_list) {
     c(x, rep(NA, max_rounds - length(x)))
   })
   
-  # row-wise binding to build the aligned matrix
   results_matrix = do.call(rbind, padded_list)
   
   return(list(

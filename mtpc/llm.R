@@ -80,21 +80,18 @@ LLMWrapper = setRefClass("LLMWrapper",
     },
 
     to = function(device) {
-      # moves the backbone and head modules to the target computing device
       backbone$to(device)
       heads$to(device)
       invisible(.self)
     },
 
     eval = function() {
-      # sets the backbone and heads to evaluation mode
       backbone$eval()
       heads$eval()
       invisible(.self)
     },
 
     train = function(mode = TRUE) {
-      # sets the backbone and heads to training mode
       backbone$train(mode)
       heads$train(mode)
       invisible(.self)
@@ -266,11 +263,9 @@ LLMWrapper = setRefClass("LLMWrapper",
 )
 
 llm_get_hidden_states = function(model, prompt_ids, decoder_ids, attention_mask = NULL, encoder_outputs = NULL) {
-  # extracts decoder hidden states using the provided wrapper model
   model$get_hidden_states(prompt_ids, decoder_ids, attention_mask, encoder_outputs)
 }
 
 llm_verify_draft = function(model, draft_tokens, encoder_outputs, decoder_ids, prompt_ids, attention_mask = NULL) {
-  # runs draft verification on the provided wrapper model
   model$verify_draft(draft_tokens, encoder_outputs, decoder_ids, prompt_ids, attention_mask)
 }

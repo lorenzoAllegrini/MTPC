@@ -3,7 +3,6 @@ library(reticulate)
 self_speculative_decoding_step = function(verifier_model, draft_model, prompt_ids, decoder_ids, circuit, lookahead_k = 4, draft_encoder_outputs = NULL, verifier_encoder_outputs = NULL, attention_mask = NULL, tokenizer = NULL, verbose = FALSE, sampling = "argmax") {
   # function that recreates the novel self speculative decoding introduced in the paper, pag 19
 
-  # compute last embedding
   hidden_states = llm_get_hidden_states(draft_model, prompt_ids, decoder_ids, attention_mask = attention_mask, encoder_outputs = draft_encoder_outputs)$x
 
   # draft from the last hidden state: the mtp head is trained so step 1 predicts the immediate next token, matching the verifier which scores from L-1
@@ -121,7 +120,6 @@ generate_speculative = function(verifier_model, draft_model, prompt_ids, circuit
   
   with(torch$no_grad(), {
 
-    # print prompt if verbose
     # prompt_ids shape: [1, seq_len]
     if (!is.null(tokenizer) && verbose) {prompt_text = safe_decode(tokenizer, as.integer(prompt_ids$select(0L, 0L)$cpu()$numpy())); cat(sprintf("prompt: '%s'\n", prompt_text))}
     
