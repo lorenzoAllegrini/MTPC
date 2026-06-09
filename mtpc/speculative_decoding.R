@@ -1,6 +1,6 @@
 library(reticulate)
 
-self_speculative_decoding_step = function(verifier_model, draft_model, prompt_ids, decoder_ids, circuit, lookahead_k = 4, draft_encoder_outputs = NULL, verifier_encoder_outputs = NULL, attention_mask = NULL, tokenizer = NULL, verbose = FALSE) {
+self_speculative_decoding_step = function(verifier_model, draft_model, prompt_ids, decoder_ids, circuit, lookahead_k = 4, draft_encoder_outputs = NULL, verifier_encoder_outputs = NULL, attention_mask = NULL, tokenizer = NULL, verbose = FALSE, sampling = "argmax") {
   # function that recreates the novel self speculative decoding introduced in the paper, pag 19
 
   # compute last embedding
@@ -8,7 +8,7 @@ self_speculative_decoding_step = function(verifier_model, draft_model, prompt_id
 
   # draft from the last hidden state: the mtp head is trained so step 1 predicts the immediate next token, matching the verifier which scores from L-1
   probs = circuit$get_draft_probs(draft_model, hidden_states)
-  drafted_tokens = circuit$generate_draft(probs)
+  drafted_tokens = circuit$generate_draft(probs, sampling = sampling)
   
   if (!is.null(tokenizer) && verbose) {draft_str = safe_decode(tokenizer, as.integer(drafted_tokens)); cat(sprintf(" drafted tokens: '%s'\n", draft_str))}
 
@@ -115,7 +115,7 @@ self_speculative_decoding_step = function(verifier_model, draft_model, prompt_id
 }
 
 
-generate_speculative = function(verifier_model, draft_model, prompt_ids, circuit, tokenizer = NULL, initial_decoder_ids = NULL, max_new_tokens = 50L, eos_token_id = 1L, verbose = FALSE) {
+generate_speculative = function(verifier_model, draft_model, prompt_ids, circuit, tokenizer = NULL, initial_decoder_ids = NULL, max_new_tokens = 50L, eos_token_id = 1L, verbose = FALSE, sampling = "argmax") {
   # generates a sequence of tokens speculatively using a verifier model, a draft model, and a speculative circuit
   device = verifier_model$backbone$device
   
@@ -169,7 +169,8 @@ generate_speculative = function(verifier_model, draft_model, prompt_ids, circuit
         draft_encoder_outputs = draft_encoder_outputs,
         attention_mask = attention_mask,
         tokenizer = tokenizer,
-        verbose = verbose
+        verbose = verbose,
+        sampling = sampling
       )
 
       new_tokens = step_result$new_tokens

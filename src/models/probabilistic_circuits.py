@@ -29,6 +29,15 @@ class FF(nn.Module):
             proj(embeddings) for proj in self.input_units_phi
         ], dim=2)
 
+    @torch.no_grad()
+    def generate_draft(self, embeddings, sampling="argmax"):
+        # independent per-position marginals: "argmax" (greedy) or "ancestral" sampling
+        logits = self.forward(embeddings[:, -1:, :])  # [B, 1, W, V]
+        if sampling == "argmax":
+            return logits.argmax(dim=-1)[:, 0, :]  # [B, W]
+        probs = F.softmax(logits[:, 0, :, :], dim=-1)  # [B, W, V]
+        return Categorical(probs=probs.to("cpu")).sample().to(embeddings.device)  # [B, W]
+
 
 class CanonicPolyidiac(nn.Module):
     def __init__(self, embedding_size, vocabulary_size, window_size, ranks=32):
@@ -71,10 +80,13 @@ class CanonicPolyidiac(nn.Module):
         return log_marginal_probs
 
     @torch.no_grad()
-    def generate_draft(self, embeddings):
+    def generate_draft(self, embeddings, sampling="argmax"):
+        # "argmax" of the per-position marginals, or "ancestral" (sample a latent rank, then emit)
+        if sampling == "argmax":
+            return self.forward(embeddings[:, -1:, :]).argmax(dim=-1)[:, 0, :]
         last_emb = embeddings[:, -1:, :]
         batch_size = last_emb.shape[0]
-        
+
         gate_logits = self.sum_unit_omega(last_emb) # [batch, 1, ranks]
         gate_probs = F.softmax(gate_logits, dim=-1).squeeze(1) # [batch, ranks]
         
@@ -212,11 +224,14 @@ class MTPC_HMM(nn.Module):
         }
 
     @torch.no_grad()
-    def generate_draft(self, embeddings):
+    def generate_draft(self, embeddings, sampling="argmax"):
+        # "argmax" of the per-position marginals, or "ancestral" sampling of the latent chain
+        if sampling == "argmax":
+            return self.forward(embeddings[:, -1:, :]).argmax(dim=-1)[:, 0, :]
         last_emb = embeddings[:, -1:, :]
         batch_size = last_emb.shape[0]
         batch_indices = torch.arange(batch_size, device=embeddings.device)
-        
+
         init_probs = F.softmax(self.sum_unit_omega_init(last_emb).squeeze(1), dim=-1)
         
         flat_input_units = self.input_units_phi(last_emb)
@@ -345,7 +360,10 @@ class BTree(nn.Module):
         return torch.stack(log_marginal_probs, dim=2)  # [B,S,W,V]
 
     @torch.no_grad()
-    def generate_draft(self, embeddings):
+    def generate_draft(self, embeddings, sampling="argmax"):
+        # "argmax" of the per-position marginals, or "ancestral" sampling of the latent tree
+        if sampling == "argmax":
+            return self.forward(embeddings[:, -1:, :]).argmax(dim=-1)[:, 0, :]
         last_emb = embeddings[:, -1:, :]
         batch_size = last_emb.shape[0]
         bidx = torch.arange(batch_size, device=embeddings.device)

@@ -23,9 +23,9 @@ ProbabilisticCircuit = setRefClass("ProbabilisticCircuit",
       # extracts draft prediction probabilities from hidden states
       stop("Not implemented") 
     },
-    generate_draft = function(probs, batch_idx = 1L) { 
-      # generates draft tokens from draft probabilities
-      stop("Not implemented") 
+    generate_draft = function(probs, batch_idx = 1L, sampling = "argmax") {
+      # generates draft tokens from draft probabilities (sampling: "argmax" or "ancestral")
+      stop("Not implemented")
     },
     compute_prefix_probs = function(probs, draft_tokens, batch_idx = 1L) { 
       # computes cumulative joint prefix probabilities for draft tokens
@@ -167,8 +167,11 @@ HMMCircuit = setRefClass("HMMCircuit",
         )
       })
     },
-    generate_draft = function(probs, batch_idx = 1L) {
-      # samples a draft sequence of tokens from hmm probabilities
+    generate_draft = function(probs, batch_idx = 1L, sampling = "argmax") {
+      # drafts a window: "argmax" of the per-position marginals, or "ancestral" sampling of the latent chain
+      sampling = match.arg(sampling, c("argmax", "ancestral"))
+      if (sampling == "argmax")
+        return(sapply(seq_len(window_size), function(t) which.max(.self$get_full_vocab_dist(probs, t, batch_idx)) - 1L))
       z = sample(seq_len(dim(probs$init)[2]), 1, prob = probs$init[batch_idx, ])
       draft_tokens = integer(window_size)
       for (t in seq_len(window_size)) {
@@ -302,12 +305,14 @@ FFCircuit = setRefClass("FFCircuit",
         return(res)
       })
     },
-    generate_draft = function(probs, batch_idx = 1L) {
-      # generates draft tokens by taking argmax at each window step
+    generate_draft = function(probs, batch_idx = 1L, sampling = "argmax") {
+      # drafts a window from the independent per-position marginals: "argmax" or "ancestral" sampling
+      sampling = match.arg(sampling, c("argmax", "ancestral"))
       p_dims = dim(probs)
       seq_idx = if (length(p_dims) == 4) p_dims[2] else if (length(p_dims) == 3) p_dims[1] else 1
       sub_prob = if (length(p_dims) == 4) probs[batch_idx, seq_idx, , ] else if (length(p_dims) == 3) probs[seq_idx, , ] else if (length(p_dims) == 2) probs else matrix(probs, nrow = window_size, byrow = TRUE)
-      apply(sub_prob, 1, which.max) - 1L
+      if (sampling == "argmax") return(apply(sub_prob, 1, which.max) - 1L)
+      apply(sub_prob, 1, function(d) sample(seq_along(d), 1, prob = d) - 1L)
     },
     get_conditional_dist = function(probs, accepted_prefix, batch_idx = 1L) {
       # retrieves the next-step conditional vocabulary distribution
@@ -411,11 +416,15 @@ CPCircuit = setRefClass("CPCircuit",
         )
       })
     },
-    generate_draft = function(probs, batch_idx = 1L) {
-      # generates draft tokens using marginal argmax at each step
+    generate_draft = function(probs, batch_idx = 1L, sampling = "argmax") {
+      # drafts a window: "argmax" of the marginals, or "ancestral" (sample a latent rank, then emit)
+      sampling = match.arg(sampling, c("argmax", "ancestral"))
+      if (sampling == "argmax")
+        return(sapply(seq_len(window_size), function(t) which.max(.self$get_full_vocab_dist(probs, t, batch_idx)) - 1L))
+      r = sample(seq_along(probs$gate[batch_idx, ]), 1, prob = probs$gate[batch_idx, ])
       sapply(seq_len(window_size), function(t) {
-        dist = .self$get_full_vocab_dist(probs, t, batch_idx)
-        which.max(dist) - 1L
+        d = probs$emiss[batch_idx, r, t, ]
+        sample(seq_along(d), 1, prob = d) - 1L
       })
     },
     compute_prefix_probs = function(probs, draft_tokens, batch_idx = 1L) {
@@ -591,9 +600,19 @@ BTreeCircuit = setRefClass("BTreeCircuit",
       v / sum(v)
     },
 
-    generate_draft = function(probs, batch_idx = 1L) {
-      # marginal-argmax draft per window position (same convention as CP)
-      sapply(seq_len(window_size), function(t) which.max(.self$get_full_vocab_dist(probs, t, batch_idx)) - 1L)
+    generate_draft = function(probs, batch_idx = 1L, sampling = "argmax") {
+      # drafts a window: "argmax" of the marginals, or "ancestral" sampling of the latent tree
+      sampling = match.arg(sampling, c("argmax", "ancestral"))
+      if (sampling == "argmax")
+        return(sapply(seq_len(window_size), function(t) which.max(.self$get_full_vocab_dist(probs, t, batch_idx)) - 1L))
+      z = integer(n_internal)
+      z[1] = sample(seq_len(ranks), 1, prob = probs$init[batch_idx, ])
+      if (n_internal >= 2L) for (k in 2:n_internal)
+        z[k] = sample(seq_len(ranks), 1, prob = probs$trans[batch_idx, k - 1L, z[node_parent[k]], ])
+      sapply(seq_len(window_size), function(t) {
+        d = probs$emiss[batch_idx, t, z[token_parent[t]], ]
+        sample(seq_along(d), 1, prob = d) - 1L
+      })
     },
 
     compute_prefix_probs = function(probs, draft_tokens, batch_idx = 1L) {

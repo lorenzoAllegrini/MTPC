@@ -1030,7 +1030,7 @@ def main():
                     # the sampled draft comes from batch item 0 while the printed marginal is item b,
                     # making the sampled tokens look like ~0-probability garbage.
                     test_emb = hidden_states[b:b+1, test_idx:test_idx+1, :]
-                    sampled_ids = model._circuit.generate_draft(test_emb)[0]
+                    sampled_ids = model._circuit.generate_draft(test_emb, sampling="ancestral")[0]
                 else:
                     sampled_ids = sample_logits.argmax(dim=-1)
                 

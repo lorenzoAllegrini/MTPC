@@ -158,7 +158,7 @@ if __name__ == "__main__":
             if head_name in ['CanonicPolyidiac', 'MTPC_HMM', 'BTree']:
                 # These expect hidden states [1, 1, D]
                 test_emb = hidden_states[:, test_idx:test_idx+1, :]
-                predicted_ids = model._circuit.generate_draft(test_emb)[0]
+                predicted_ids = model._circuit.generate_draft(test_emb, sampling="ancestral")[0]
             else:
                 # FF head: mtp_logits is [B, L, W, V]
                 predicted_logits = mtp_logits[0, test_idx] # [W, V]

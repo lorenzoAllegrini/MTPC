@@ -12,6 +12,7 @@ RANKS = 32L
 MAX_LEN = 2048L
 SHIFT_OFFSET_MINUS_1 = FALSE # set to TRUE only if loading legacy checkpoints trained with shifted target alignment
 CHEAT = FALSE # keep FALSE: cheat feeds the full answer into byt5's encoder so it learns to copy instead of predict
+SAMPLING = "argmax" # draft strategy for every circuit: "argmax" (greedy) or "ancestral" (sample the latents)
 
 
 N_SAMPLES = 100L
@@ -46,7 +47,7 @@ run_inference_experiment = function(dataset, verifier_model, draft_model, circui
       prompt_ids = prompt_ids, 
       circuit = circuit, tokenizer = tokenizer, 
       initial_decoder_ids = initial_decoder_ids, 
-      max_new_tokens = max_new_tokens, verbose = TRUE
+      max_new_tokens = max_new_tokens, verbose = TRUE, sampling = SAMPLING
     )
     
     res_list[[i]] = list(
