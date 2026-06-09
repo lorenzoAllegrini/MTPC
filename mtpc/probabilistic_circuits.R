@@ -655,11 +655,14 @@ BTreeCircuit = setRefClass("BTreeCircuit",
 )
 
 create_circuit = function(type, window_size = 8L, ranks = 32L) {
-  switch(tolower(type),
-    "hmm"   = HMMCircuit$new(window_size = window_size, ranks = ranks),
-    "ff"    = FFCircuit$new(window_size = window_size, ranks = ranks),
-    "cp"    = CPCircuit$new(window_size = window_size, ranks = ranks),
-    "btree" = BTreeCircuit$new(window_size = window_size, ranks = ranks),
-    stop(sprintf("Tipo di circuito sconosciuto: '%s'. Usa 'hmm', 'ff', 'cp' o 'btree'.", type))
-  )
+  type = tolower(type)
+  if (type == "hmm") {
+    HMMCircuit$new(window_size = window_size, ranks = ranks)
+  } else if (type == "ff") {
+    FFCircuit$new(window_size = window_size, ranks = ranks)
+  } else if (type == "cp") {
+    CPCircuit$new(window_size = window_size, ranks = ranks)
+  } else {
+    BTreeCircuit$new(window_size = window_size, ranks = ranks)
+  }
 }
