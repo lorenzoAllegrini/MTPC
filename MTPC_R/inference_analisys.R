@@ -3,11 +3,6 @@
 library(boot)
 source("utils.R")
 
-# set working directory to script folder (rstudio compatible)
-if (interactive() && requireNamespace("rstudioapi", quietly = TRUE)) {
-  setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-}
-
 par(mar=c(4, 4, 2, 1))
 
 # find and load the benchmark results (dynamic detection of w6 or w4)
