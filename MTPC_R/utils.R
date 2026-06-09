@@ -67,14 +67,14 @@ preprocess_conversations = function(messages_list, tokenizer, max_len = 4096L, t
     # off tracks cumulative byte position so we can mask the correct label indices per message
     off = 0L
     for (msg in conv) {
-      pfx = sprintf("<|%s|>\n", msg$role)
+      pfx = paste0("<|", msg$role, "|>\n")
       sfx = "<|end|>\n"
-      len = nchar(paste0(pfx, msg$content, sfx), type = "bytes")
+      len = nchar(paste0(pfx, msg$content, sfx))
       if (msg$role != "assistant") {
         lbl[(off + 1L):min(off + len, length(ids))] = -100L
       } else {
-        lbl[(off + 1L):min(off + nchar(pfx, type = "bytes"), length(ids))] = -100L
-        lbl[min(off + len - nchar(sfx, type = "bytes") + 1L, length(ids)):min(off + len, length(ids))] = -100L
+        lbl[(off + 1L):min(off + nchar(pfx), length(ids))] = -100L
+        lbl[min(off + len - nchar(sfx) + 1L, length(ids)):min(off + len, length(ids))] = -100L
       }
       off = off + len
       if (off >= length(ids)) break
@@ -83,9 +83,9 @@ preprocess_conversations = function(messages_list, tokenizer, max_len = 4096L, t
   })
   res = res[!sapply(res, is.null)]
   list(
-    input_ids = lapply(res, `[[`, "ids"),
-    attention_mask = lapply(res, `[[`, "mask"),
-    labels = lapply(res, `[[`, "lbl")
+    input_ids = lapply(res, function(x) x$ids),
+    attention_mask = lapply(res, function(x) x$mask),
+    labels = lapply(res, function(x) x$lbl)
   )
 }
 
@@ -95,29 +95,3 @@ prepare_train_data = function(task_filter, tokenizer, max_len, batch_size, max_s
   create_batches(preprocess_conversations(splits$train$to_dict()$messages, tokenizer, max_len), batch_size)
 }
 
-init_probabilistic_circuit = function(head_type, window_size, ranks) {
-  # initializes a probabilistic circuit of the specified type
-  switch(tolower(head_type),
-    "ff" = FFCircuit$new(window_size = window_size, ranks = ranks),
-    "hmm" = HMMCircuit$new(window_size = window_size, ranks = ranks),
-    "cp" = CPCircuit$new(window_size = window_size, ranks = ranks),
-    "btree" = BTreeCircuit$new(window_size = window_size, ranks = ranks),
-    stop(sprintf("Tipo di testa non supportato: %s", head_type))
-  )
-}
-
-get_model_paths = function(head_type, window_size) {
-  # retrieves the lora save directory and head weights paths for a given model type
-  t = tolower(head_type)
-  if (t == "hmm") {
-    list(
-      lora_dir = sprintf("saved_models/lora_hmm_w%d/mtp_backbone_lora_mtpc_hmm_w%d_ft", window_size, window_size),
-      weights_path = sprintf("saved_models/mtp_head_mtpc_hmm_w%d_ft.pth", window_size)
-    )
-  } else {
-    list(
-      lora_dir = sprintf("saved_models/lora_%s_w%d/mtp_backbone_lora_%s_w%d", t, window_size, t, window_size),
-      weights_path = sprintf("saved_models/mtp_head_%s_w%d_final.pth", t, window_size)
-    )
-  }
-}
