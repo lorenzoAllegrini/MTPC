@@ -30,7 +30,7 @@ run_inference_experiment = function(dataset, verifier_model, draft_model, circui
   res_list = list()
   for (i in seq_along(sample_indices)) {
     idx = sample_indices[i]
-    cat(sprintf("\n--- Sample %d / %d (Dataset Index %d) ---\n", i, length(sample_indices), idx))
+    cat("Sample", i, "of", length(sample_indices), "\n")
     
     msg = dataset[as.integer(idx - 1)]$messages
     p_txt = tokenizer$apply_chat_template(msg[1:(length(msg)-1)], chat_template = CHAT_TEMPLATE, tokenize = FALSE, add_generation_prompt = TRUE)
@@ -74,7 +74,7 @@ run_inference_experiment = function(dataset, verifier_model, draft_model, circui
   
   metrics = compute_speculative_decoding_metrics(res_list)
   
-  cat(sprintf("\nglobal acceptance: %.2f%%\n", (metrics$global_accepted / metrics$global_proposed) * 100))
+  cat("global acceptance", round(metrics$global_accepted / metrics$global_proposed * 100, 2), "\n")
   
   list(acceptance_matrix = metrics$acceptance_matrix, generated_texts = metrics$generated_texts, prompt_texts = metrics$prompt_texts)
 }
@@ -84,7 +84,7 @@ tokenizer = transformers$AutoTokenizer$from_pretrained(MODEL_ID)
 
 # ensure dataset is available
 if (!exists("dataset")) {
-  cat("\n[SYSTEM] Dataset 'dataset' not found in workspace. Loading and splitting 'ai2-adapt-dev/flan_v2_converted'...\n")
+  cat("loading dataset\n")
   splits = load_tulu_dataset("ai2-adapt-dev/flan_v2_converted", max_samples = 1000L)
   dataset = splits$test
 }
@@ -145,7 +145,7 @@ get_inference_paths = function(head_type, window_size) {
 }
 
 for (head_type in PROBABILISTIC_HEADS) {
-  cat(sprintf("\nLoading draft model for: %s\n", head_type))
+  cat("loading draft model", head_type, "\n")
   paths = get_inference_paths(head_type, WINDOW_SIZE)
   
   draft_model = LLMWrapper(

@@ -5,22 +5,40 @@ CHAT_TEMPLATE = "{% for message in messages %}{{ '<|' + message['role'] + '|>\\n
 # compute speculative decoding statistics from raw list of experiment results
 compute_speculative_decoding_metrics = function(res_list) {
   # computes global and round-by-round speculative decoding metrics from experiment results
-  generated_texts = sapply(res_list, function(x) x$generated_text)
-  prompt_texts    = sapply(res_list, function(x) x$prompt_text)
-  
-  global_accepted = sum(sapply(res_list, function(x) x$total_accepted))
-  global_proposed = sum(sapply(res_list, function(x) x$total_proposed))
-  
-  # process and pad the ragged acceptance list
-  acceptance_list = lapply(res_list, function(x) x$round_accepted)
-  max_rounds      = max(sapply(acceptance_list, length))
-  
-  padded_list = lapply(acceptance_list, function(x) {
-    c(x, rep(NA, max_rounds - length(x)))
-  })
-  
-  results_matrix = do.call(rbind, padded_list)
-  
+
+  n = length(res_list)
+
+  # first go through the list once and add up the totals
+  global_accepted = 0
+  global_proposed = 0
+  generated_texts = c()
+  prompt_texts = c()
+  for (i in 1:n) {
+    x = res_list[[i]]
+    global_accepted = global_accepted + x$total_accepted
+    global_proposed = global_proposed + x$total_proposed
+    generated_texts[i] = x$generated_text
+    prompt_texts[i] = x$prompt_text
+  }
+
+  # find out the largest number of rounds so we know how wide the matrix is
+  max_rounds = 0
+  for (i in 1:n) {
+    rounds = res_list[[i]]$round_accepted
+    if (length(rounds) > max_rounds) {
+      max_rounds = length(rounds)
+    }
+  }
+
+  # build the matrix one row at a time, padding short rows with NA
+  results_matrix = matrix(NA, nrow = n, ncol = max_rounds)
+  for (i in 1:n) {
+    rounds = res_list[[i]]$round_accepted
+    for (j in 1:length(rounds)) {
+      results_matrix[i, j] = rounds[j]
+    }
+  }
+
   return(list(
     acceptance_matrix = results_matrix,
     generated_texts   = generated_texts,

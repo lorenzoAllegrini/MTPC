@@ -9,7 +9,7 @@ self_speculative_decoding_step = function(verifier_model, draft_model, prompt_id
   probs = circuit$get_draft_probs(draft_model, hidden_states)
   drafted_tokens = circuit$generate_draft(probs, sampling = sampling)
   
-  if (!is.null(tokenizer) && verbose) {draft_str = safe_decode(tokenizer, as.integer(drafted_tokens)); cat(sprintf(" drafted tokens: '%s'\n", draft_str))}
+  if (!is.null(tokenizer) && verbose) {draft_str = safe_decode(tokenizer, as.integer(drafted_tokens)); cat(" drafted tokens", draft_str, "\n")}
 
   # cumulative prefix probability for each token
   q_prefix = circuit$compute_prefix_probs(probs, drafted_tokens)
@@ -41,24 +41,7 @@ self_speculative_decoding_step = function(verifier_model, draft_model, prompt_id
     for (i in seq_len(n)) {
       token_str = if (!is.null(tokenizer)) safe_decode(tokenizer, as.integer(drafted_tokens[i])) else as.character(drafted_tokens[i])
       accepted = (i <= s)
-      cat(sprintf("    - [%d] '%s': Q=%.4f | P=%.4f -> %s\n", 
-                  i, token_str, q_cond[i], p_vals[i], 
-                  if (accepted) "ACCETTATO" else "RIGETTATO"))
-      
-      # print verifier top-5 for this position
-      if (!is.null(tokenizer)) {
-        pos_dist = verification$full_p_dist$select(1L, as.integer(i - 1L))$squeeze(0L)
-        top_pos = torch$topk(pos_dist$cpu(), 5L)
-        top_pos_vals = top_pos$values$tolist()
-        top_pos_ids = top_pos$indices$tolist()
-        cat(sprintf("       Verifier top 5 for pos %d:\n", i))
-        for (k in 1:5) {
-          v_val = top_pos_vals[k]
-          v_id = top_pos_ids[k]
-          v_char = safe_decode(tokenizer, as.integer(v_id))
-          cat(sprintf("         - '%s' (p=%.4f, id=%d)\n", v_char, v_val, v_id))
-        }
-      }
+      cat(" token", i, token_str, "Q", round(q_cond[i], 4), "P", round(p_vals[i], 4), if (accepted) "accepted" else "rejected", "\n")
     }
   }
 
@@ -77,30 +60,17 @@ self_speculative_decoding_step = function(verifier_model, draft_model, prompt_id
     Z = torch$sum(m_x)
     r_x = if (Z$item() > 0) m_x / Z else p_dist_err
     
-    if (!is.null(tokenizer) && verbose) {
-      top_vals_ids = torch$topk(r_x$cpu(), 5L)
-      vals_vec = top_vals_ids$values$tolist()
-      ids_vec = top_vals_ids$indices$tolist()
-      cat("    Bonus distribution top 5:\n")
-      for (k in 1:5) {
-        val = vals_vec[k]
-        id = ids_vec[k]
-        char = safe_decode(tokenizer, as.integer(id))
-        cat(sprintf("      - '%s' (p=%.4f, id=%d)\n", char, val, id))
-      }
-    }
-    
     # cpu fallback for multinomial sampling due to PyTorch MPS backend bug
     next_token = torch$multinomial(r_x$cpu(), num_samples = 1L)$item()
     if (!is.null(tokenizer) && verbose) {
-       cat(sprintf("    - [%d] Bonus (M): '%s' (Sostituzione)\n", s + 1, safe_decode(tokenizer, as.integer(next_token))))
+       cat(" bonus token", safe_decode(tokenizer, as.integer(next_token)), "\n")
     }
   } else {
     bonus_p_dist = verification$full_p_dist$select(1L, as.integer(n))$squeeze(0L)
     # cpu fallback for multinomial sampling due to PyTorch MPS backend bug
     next_token = torch$multinomial(bonus_p_dist$cpu(), num_samples = 1L)$item()
     if (!is.null(tokenizer) && verbose) {
-       cat(sprintf("    - [%d] Bonus (P): '%s'\n", n + 1, safe_decode(tokenizer, as.integer(next_token))))
+       cat(" bonus token", safe_decode(tokenizer, as.integer(next_token)), "\n")
     }
   }
   
@@ -121,7 +91,7 @@ generate_speculative = function(verifier_model, draft_model, prompt_ids, circuit
   with(torch$no_grad(), {
 
     # prompt_ids shape: [1, seq_len]
-    if (!is.null(tokenizer) && verbose) {prompt_text = safe_decode(tokenizer, as.integer(prompt_ids$select(0L, 0L)$cpu()$numpy())); cat(sprintf("prompt: '%s'\n", prompt_text))}
+    if (!is.null(tokenizer) && verbose) {prompt_text = safe_decode(tokenizer, as.integer(prompt_ids$select(0L, 0L)$cpu()$numpy())); cat("prompt", prompt_text, "\n")}
     
     # mask padding tokens
     pad_id = as.integer(verifier_model$backbone$config$pad_token_id)
@@ -187,7 +157,7 @@ generate_speculative = function(verifier_model, draft_model, prompt_ids, circuit
         full_toks = as.integer(decoder_ids[0]$cpu()$numpy())
         tokens_to_decode = if (length(full_toks) > P + 1L) full_toks[(P + 2L):length(full_toks)] else integer(0)
         current_text = safe_decode(tokenizer, tokens_to_decode)
-        cat(sprintf("  [GENERATED SO FAR]: '%s'\n", current_text))
+        cat(" generated so far", current_text, "\n")
       }
       
       if (any(new_tokens == eos_token_id)) break

@@ -36,17 +36,16 @@ compute_mtpc_loss = function(mtp_logits, labels, window_size, gamma = 0.8, is_lo
   
   # mtp_logits shape [batch_size, seq_len, window_size, vocab_size]; labels shape [batch_size, seq_len]
   vocab_size = as.integer(mtp_logits$shape[as.integer(mtp_logits$dim() - 1L)])
-  losses = lapply(seq_len(window_size), function(j) {
+  loss = 0
+  for (j in seq_len(window_size)) {
     # roll targets to align with future tokens, shape: [batch_size, seq_len]
     targets = torch$roll(labels, shifts = as.integer(-(j - 1L)), dims = 1L)
     # extract logits for step j-1, shape: [batch_size, seq_len, vocab_size] -> [batch_size * seq_len, vocab_size]
     flat_logits = mtp_logits$select(2L, as.integer(j - 1L))$reshape(-1L, vocab_size)
     step_loss = if (is_log_probs) F_$nll_loss(flat_logits, targets$reshape(-1L), ignore_index = -100L) else F_$cross_entropy(flat_logits, targets$reshape(-1L), ignore_index = -100L)
-    val = step_loss$item()
-    if (!is.nan(val) && !is.infinite(val)) (gamma^(j-1)) * step_loss else NULL
-  })
-  losses = losses[!sapply(losses, is.null)]
-  if (length(losses) == 0L) torch$tensor(0.0, device = mtp_logits$device) else torch$stack(losses)$sum()
+    loss = loss + (gamma^(j-1)) * step_loss
+  }
+  return(loss)
 }
 
 save_model = function(model, head_type_name, window_size, save_dir = "saved_models") {
@@ -64,14 +63,6 @@ load_model_weights = function(model, weights_path, device) {
 }
 
 safe_decode = function(tokenizer, tokens) {
-  # decodes tokens to an r string; r strings cannot hold an embedded nul (\x00), so on the rare
-  # nul byte we rebuild the text from byt5 bytes (byte value = token id - 3) and mark nul as <NUL>
-  ids = as.integer(tokens)
-  tryCatch(as.character(tokenizer$decode(as.list(ids))), error = function(e) {
-    b = ids[ids >= 3L & ids <= 258L] - 3L
-    if (!length(b)) return("")
-    segs = split(b, cumsum(b == 0L))
-    paste(vapply(segs, function(x) { x = x[x != 0L]; s = rawToChar(as.raw(x)); Encoding(s) <- "UTF-8"; s },
-                 character(1)), collapse = "<NUL>")
-  })
+  # decodes the tokens back into a string
+  as.character(tokenizer$decode(as.list(as.integer(tokens))))
 }

@@ -1,31 +1,12 @@
 # MTPC — Multi-Token Prediction with Probabilistic Circuits — R re-implementation
 
 R re-implementation of *"Fast and Expressive Multi-Token Prediction with Probabilistic
-Circuits"* (MTPC, arXiv 2511.11346): a **byT5-small** model is retrofitted with a
-probabilistic-circuit head that models the *joint* distribution over the next *n* tokens,
-and that head is used as the **draft model** in self-speculative decoding. Everything is in
-R; the PyTorch / Hugging Face back-ends (`torch`, `transformers`, `peft`, `datasets`) are
-driven through **`reticulate`** — there is no project Python code.
-
+Circuits"* 
 The code splits into a **core library** (`mtpc/`) and **three entry-point scripts** that
 follow the workflow of the project: **training → inference → analysis**.
 
-```
-mtpc/                              core library (shared building blocks)
-  llm.R
-  probabilistic_circuits.R
-  speculative_decoding.R
-  utils.R
-utils.R
-training.R                         (1) training
-speculative_inference_testing.R    (2) inference / benchmark
-inference_analisys.R               (3) analysis
-benchmark_results/                 outputs of steps (2) and (3)
-saved_models/                      checkpoints produced by step (1)  [not bundled — see end]
-```
 
-## 1. Training — `training.R`
-
+## Training 
 `training.R` trains a chosen circuit (`HEAD_TYPE` ∈ `ff` / `cp` / `hmm` / `btree`) in three
 phases: **(0)** autoregressive backbone fine-tuning, **(1)** feed-forward warm-up, **(2)**
 joint training of the target circuit, initialised from the trained FF head so it starts
@@ -75,15 +56,6 @@ Wilcoxon, and the comparison plots.
 **Output → `benchmark_results/`**: the written report and the bar / box / density plots
 (metric = mean acceptance rate, i.e. tokens accepted per round, out of the window size).
 
-## Results (window = 6, 50 prompts, self-speculative, `argmax` draft)
-
-| circuit | tokens/round | acceptance |
-|---------|-------------:|-----------:|
-| CP        | 1.80 / 6     | 30.1 % |
-| **BTree** | **1.66 / 6** | **27.6 %** |
-| HMM       | 1.33 / 6     | 22.2 % |
-| FF        | 1.10 / 6     | 18.4 % |
-
 BTree is statistically tied with CP (post-hoc Wilcoxon *p* = 0.24) and significantly above
 HMM and FF (Friedman χ² = 76.1, *p* ≈ 2e-16). Full write-up in
 [`benchmark_results/btree_report.md`](benchmark_results/btree_report.md).
@@ -98,12 +70,7 @@ python -m venv .venv && . .venv/bin/activate && pip install torch transformers p
 ```
 
 ```r
-Rscript training.R                       # step 1 — set HEAD_TYPE / phase flags at the top
-Rscript speculative_inference_testing.R  # step 2 — set SAMPLING = "argmax" | "ancestral"
-Rscript inference_analisys.R             # step 3
+Rscript training.R                       
+Rscript speculative_inference_testing.R  
+Rscript inference_analisys.R          
 ```
-
-**Trained models** (~1.3 GB) are not bundled; place them under `saved_models/` as
-`byt5_standard_lora_phase0/` (verifier), `lora_ff_w6_phase1/` + `mtp_head_ff_w6_phase1.pth`,
-and `lora_<c>_w6/…` + `mtp_head_<c>_w6_final.pth` for `c ∈ {cp, hmm, btree}`. Without them,
-`training.R` still trains from scratch (the dataset is downloaded automatically).
