@@ -97,56 +97,19 @@ verifier_model$to(device)
 verifier_model$eval()
 
 all_results = list()
-get_inference_paths = function(head_type, window_size) {
-  # explicit model paths (window 6 checkpoints); hmm uses its real adapter/head, not a .pth backbone
-  return(switch(head_type,
-    "ff"  = list(lora_dir = "saved_models/lora_ff_w6/mtp_backbone_lora_ff_w6", weights_path = "saved_models/mtp_head_ff_w6_final.pth"),
-    "cp"  = list(lora_dir = "saved_models/lora_cp_w6/mtp_backbone_lora_cp_w6",   weights_path = "saved_models/mtp_head_cp_w6_final.pth"),
+get_inference_paths = function(head_type) {
+  # model paths for the window-6 checkpoints
+  switch(head_type,
+    "ff"    = list(lora_dir = "saved_models/lora_ff_w6/mtp_backbone_lora_ff_w6",       weights_path = "saved_models/mtp_head_ff_w6_final.pth"),
+    "cp"    = list(lora_dir = "saved_models/lora_cp_w6/mtp_backbone_lora_cp_w6",       weights_path = "saved_models/mtp_head_cp_w6_final.pth"),
     "hmm"   = list(lora_dir = "saved_models/lora_hmm_w6/mtp_backbone_lora_hmm_w6",     weights_path = "saved_models/mtp_head_hmm_w6_final.pth"),
-    "btree" = list(lora_dir = "saved_models/lora_btree_w6/mtp_backbone_lora_btree_w6", weights_path = "saved_models/mtp_head_btree_w6_final.pth"),
-    stop(sprintf("Unknown head_type: %s", head_type))
-  ))
-
-  # legacy auto-resolution (unreachable, kept for reference)
-  # check if v1 reference models exist in saved_models
-  v1_lora = sprintf("saved_models/lora_%s_w%d_phase1_v1", head_type, window_size)
-  v1_weights = sprintf("saved_models/mtp_head_%s_w%d_phase1_v1.pth", head_type, window_size)
-  
-  if (file.exists(v1_weights) && file.exists(v1_lora)) {
-    return(list(lora_dir = v1_lora, weights_path = v1_weights))
-  }
-  
-  # check standard path in saved_models or legacy_models
-  lora_dir = sprintf("saved_models/lora_%s_w%d/mtp_backbone_lora_%s_w%d", head_type, window_size, head_type, window_size)
-  weights_path = sprintf("saved_models/mtp_head_%s_w%d_final.pth", head_type, window_size)
-  
-  if (!file.exists(weights_path) || !file.exists(lora_dir)) {
-    # check legacy_models
-    legacy_lora = sprintf("legacy_models/lora_%s_w%d/mtp_backbone_lora_%s_w%d", head_type, window_size, head_type, window_size)
-    legacy_weights = sprintf("legacy_models/mtp_head_%s_w%d_final.pth", head_type, window_size)
-    if (file.exists(legacy_weights) && file.exists(legacy_lora)) {
-      lora_dir = legacy_lora
-      weights_path = legacy_weights
-    }
-  }
-  
-  # fallbacks for specific custom paths in saved_models or legacy_models
-  if (!file.exists(weights_path) || !file.exists(lora_dir)) {
-    # check phase 1 in legacy_models
-    alt_lora = sprintf("legacy_models/lora_%s_w%d_phase1", head_type, window_size)
-    alt_weights = sprintf("legacy_models/mtp_head_%s_w%d_phase1.pth", head_type, window_size)
-    if (file.exists(alt_weights) && file.exists(alt_lora)) {
-      lora_dir = alt_lora
-      weights_path = alt_weights
-    }
-  }
-  
-  return(list(lora_dir = lora_dir, weights_path = weights_path))
+    "btree" = list(lora_dir = "saved_models/lora_btree_w6/mtp_backbone_lora_btree_w6", weights_path = "saved_models/mtp_head_btree_w6_final.pth")
+  )
 }
 
 for (head_type in PROBABILISTIC_HEADS) {
   cat("loading draft model", head_type, "\n")
-  paths = get_inference_paths(head_type, WINDOW_SIZE)
+  paths = get_inference_paths(head_type)
   
   draft_model = LLMWrapper(
     model_id = MODEL_ID, 

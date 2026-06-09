@@ -5,7 +5,7 @@ self_speculative_decoding_step = function(verifier_model, draft_model, prompt_id
 
   hidden_states = llm_get_hidden_states(draft_model, prompt_ids, decoder_ids, attention_mask = attention_mask, encoder_outputs = draft_encoder_outputs)$x
 
-  # draft from the last hidden state: the mtp head is trained so step 1 predicts the immediate next token, matching the verifier which scores from L-1
+  # draft the next tokens from the last hidden state
   probs = circuit$get_draft_probs(draft_model, hidden_states)
   drafted_tokens = circuit$generate_draft(probs, sampling = sampling)
   
