@@ -54,7 +54,7 @@ load_tulu_dataset = function(task_filter, max_samples = 1000L) {
   idx = which(ds$select_columns("source")$to_dict()[["source"]] == task_filter)
   if (length(idx) == 0) return(NULL)
   filtered = ds$select(as.integer(idx - 1L))$shuffle(seed = 42L)
-  filtered$select(seq(0L, min(max_samples, as.integer(filtered$num_rows)) - 1L))$train_test_split(test_size = 0.05)
+  filtered$select(seq(0L, min(max_samples, as.integer(filtered$num_rows)) - 1L))$train_test_split(test_size = 0.05, seed = 42L)
 }
 
 preprocess_conversations = function(messages_list, tokenizer, max_len = 4096L, template = CHAT_TEMPLATE) {
