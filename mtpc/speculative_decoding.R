@@ -9,7 +9,7 @@ self_speculative_decoding_step = function(verifier_model, draft_model, prompt_id
   probs = circuit$get_draft_probs(draft_model, hidden_states)
   drafted_tokens = circuit$generate_draft(probs, sampling = sampling)
   
-  if (!is.null(tokenizer) && verbose) {draft_str = safe_decode(tokenizer, as.integer(drafted_tokens)); cat(" drafted tokens", draft_str, "\n")}
+  if (!is.null(tokenizer) && verbose) {draft_str = safe_decode(tokenizer, as.integer(drafted_tokens)); cat("predicted:", draft_str, "\n")}
 
   # cumulative prefix probability for each token
   q_prefix = circuit$compute_prefix_probs(probs, drafted_tokens)
@@ -42,6 +42,10 @@ self_speculative_decoding_step = function(verifier_model, draft_model, prompt_id
       token_str = if (!is.null(tokenizer)) safe_decode(tokenizer, as.integer(drafted_tokens[i])) else as.character(drafted_tokens[i])
       accepted = (i <= s)
       cat(" token", i, token_str, "Q", round(q_cond[i], 4), "P", round(p_vals[i], 4), if (accepted) "accepted" else "rejected", "\n")
+    }
+    if (!is.null(tokenizer)) {
+      acc_str = if (s > 0) safe_decode(tokenizer, as.integer(drafted_tokens[1:s])) else ""
+      cat("accepted", s, "of", n, ":", acc_str, "\n")
     }
   }
 
